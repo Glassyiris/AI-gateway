@@ -34,7 +34,6 @@ services:
         condition: service_started
     pids_limit: 512
     mem_limit: 64m
-    memswap_limit: 64m
     cpus: 0.2
     read_only: true
     cap_drop: [ALL]
@@ -64,7 +63,6 @@ services:
         restart: true
     pids_limit: 64
     mem_limit: 64m
-    memswap_limit: 64m
     cpus: 0.5
     tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=4m"]
     cap_drop: [ALL]
@@ -121,7 +119,6 @@ services:
         restart: true
     pids_limit: 128
     mem_limit: 512m
-    memswap_limit: 512m
     cpus: 1.0
     read_only: true
     cap_drop: [ALL]
@@ -145,7 +142,6 @@ services:
         condition: service_started
     pids_limit: 512
     mem_limit: 64m
-    memswap_limit: 64m
     cpus: 0.2
     read_only: true
     cap_drop: [ALL]
