@@ -136,7 +136,7 @@ services:
         ipv4_address: 172.30.62.3
 
   cli-proxy-api:
-    image: ${CLI_PROXY_IMAGE:-ghcr.io/xz-dev/cli-proxy-api:v8.0.4-pr6189-8f82146@sha256:eeeac396baaaeec7868201eb0b779f423c7d4d3303c49e3d52cc827b1d4ae19b}
+    image: ${CLI_PROXY_IMAGE:-ghcr.io/xz-dev/cli-proxy-api:v8.0.22-pr6189-c718f4d@sha256:e02efefde0e7272d0f2655b29ee4ae2316badf66d08de1ef9b50e2223eb2caf5}
     network_mode: service:cpa-netns
     entrypoint: [/bin/bash, -ec]
     command:
@@ -300,7 +300,7 @@ services:
         ipv4_address: 172.30.60.2
 
   sub2api:
-    image: ${SUB2API_IMAGE:-ghcr.io/xz-dev/sub2api:0.2.10-pr7157-pr7217-pr3172-9a21b93@sha256:8c2f6075379d77ff52457e9b7235d3410d81afca0cb2b1aa31109cd3c3fc0262}
+    image: ${SUB2API_IMAGE:-ghcr.io/xz-dev/sub2api:0.2.15-pr7157-pr7217-pr3172-2ddb824@sha256:00038989050e7f85c47accb3626fa12301635f65615a1ea5cc223ea331ebb8c6}
     network_mode: service:sub2api-netns
     entrypoint: [/bin/sh, -ec]
     command:
@@ -898,7 +898,7 @@ services:
       - ./aisix/resources.yaml:/etc/aisix/resources.yaml:ro,Z
 
   cloudflared:
-    image: ${CLOUDFLARED_IMAGE:-docker.io/cloudflare/cloudflared:2026.9.3}
+    image: ${CLOUDFLARED_IMAGE:-docker.io/cloudflare/cloudflared:2026.10.0@sha256:9b49eed8f62806d5d45ddf59ecefb5710429598ea6d3fcccd2af938f621b2b07}
     restart: unless-stopped
     pids_limit: 64
     mem_limit: 96m
