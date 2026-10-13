@@ -1,6 +1,15 @@
 # AI Gateway
 
 > [!IMPORTANT]
+> You can use this project exactly as it is, but consider it merely a starting point—your imagination will surely enable you to create something even better than what I have built.
+> 
+> Furthermore, this project serves as my protest against the proliferation of AI gateways that lack any standardization.
+>
+> 这个项目你可以原样使用，也是抛砖引玉，你的想象力一定能创造比我更美好的东西
+> 
+> 此外本项目是我对于 AI 网关满天飞但是却毫不规范的抗议
+
+> [!IMPORTANT]
 > This project lets you build an AI gateway that is entirely your own, one module at a time. The architecture combines the strengths of each module and covers their weaknesses, so you are not limited by any single gateway or component, and you do not need large-scale custom development.
 
 > [!NOTE]
