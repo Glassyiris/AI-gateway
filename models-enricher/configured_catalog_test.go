@@ -111,8 +111,8 @@ func TestConfiguredSourcesAndStaticModels(t *testing.T) {
 		overrides, _ := static["overrides"].(map[string]any)
 		switch slug {
 		case "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-6-astra", "gpt-6-luna", "gpt-6.1-sol":
-			if toInt(overrides["context_window"]) != 372000 || toInt(overrides["max_context_window"]) != 372000 {
-				t.Fatalf("gpt static %s must carry the 372000 context overrides: %v", slug, static)
+			if toInt(overrides["context_window"]) != 500000 || toInt(overrides["max_context_window"]) != 500000 {
+				t.Fatalf("gpt static %s must carry the 500000 context overrides: %v", slug, static)
 			}
 		case "glm-5.2":
 			if overrides["default_reasoning_level"] != "max" {
@@ -206,8 +206,8 @@ func TestConfiguredSourcesAndStaticModels(t *testing.T) {
 	for slug, model := range bySlug {
 		switch slug {
 		case "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-6-astra":
-			if toInt(model["context_window"]) != 372000 || toInt(model["max_context_window"]) != 372000 {
-				t.Fatalf("gpt static %s must override context to 372000: %v", slug, model)
+			if toInt(model["context_window"]) != 500000 || toInt(model["max_context_window"]) != 500000 {
+				t.Fatalf("gpt static %s must override context to 500000: %v", slug, model)
 			}
 		case "glm-5.2":
 			if model["default_reasoning_level"] != "max" {
