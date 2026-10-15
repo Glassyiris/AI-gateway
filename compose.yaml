@@ -169,7 +169,8 @@ services:
       - ./data/cpa/conf:/CLIProxyAPI/conf:Z
       - ./data/cpa/auths:/root/.cli-proxy-api:Z
       - ./data/cpa/logs:/CLIProxyAPI/logs:Z
-      - ./data/cpa/plugins:/CLIProxyAPI/plugins:Z
+      # ro: blocks in-process plugin hot reload (two SQLite copies in one process corrupted quota db)
+      - ./data/cpa/plugins:/CLIProxyAPI/plugins:ro,Z
       - ./data/cpa/runtime:/CLIProxyAPI/data:Z
       - ./data/cpa/mgmt.key:/CLIProxyAPI/mgmt.key:ro,Z
       - ./data/egress-proxy/ca-bundle.pem:/etc/ssl/certs/ai-gateway-ca-bundle.pem:ro,z
