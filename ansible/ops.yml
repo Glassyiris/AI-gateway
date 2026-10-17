@@ -5,6 +5,7 @@
 #   ansible-playbook ops.yml --tags deploy-squid  [-e ai_ops_mode=plan]
 #   ansible-playbook ops.yml --tags deploy-aisix      [-e ai_ops_mode=plan]
 #   ansible-playbook ops.yml --tags deploy-model-sync  [-e ai_ops_mode=plan]
+#   ansible-playbook ops.yml --tags deploy-response-keeper [-e ai_ops_mode=plan]
 #   ansible-playbook ops.yml --tags rollback-model-sync
 #   ansible-playbook ops.yml --tags rollback           -e service=cli-proxy-api
 #
@@ -718,6 +719,160 @@
           ready_attempts={{ ai_ws_keepalive_ready_attempts | default('') }}
       when: ai_ops_mode != "plan"
       tags: [deploy-ws-keepalive]
+
+    # ======================= deploy-response-keeper =======================
+    # Adds the loopback response-keeper sidecar and the apisix-models /rk route.
+    # Accounts opt in per base_url (.../rk/v1); existing paths are unchanged.
+    # Order: pull approved digest -> compose/.env -> start keeper -> apisix.yaml
+    # (recreate apisix-models) -> recreate sub2api for the WS recovery env.
+    - name: Resolve desired response-keeper image from private .env
+      ansible.builtin.set_fact:
+        _rk_desired_image: "{{ lookup('ansible.builtin.file', ai_ops_config_dir + '/.env') | regex_search('(?m)^RESPONSE_KEEPER_IMAGE=(.+)$', '\\1') | first }}"
+      no_log: true  # reading .env; expose only the parsed field
+      tags: [deploy-response-keeper]
+
+    - name: Read current response-keeper / apisix-models / sub2api containers
+      ansible.builtin.command: "{{ _compose }} ps -q {{ item }}"
+      register: _rk_plan_containers
+      changed_when: false
+      failed_when: false
+      loop: [response-keeper, apisix-models, sub2api]
+      tags: [deploy-response-keeper]
+
+    - name: Show response-keeper plan
+      ansible.builtin.debug:
+        msg:
+          desired_image: "{{ _rk_desired_image }}"
+          current: "{{ dict(_rk_plan_containers.results | map(attribute='item') | zip(_rk_plan_containers.results | map(attribute='stdout') | map('trim'))) }}"
+          recreation: [response-keeper, apisix-models, sub2api]
+      tags: [deploy-response-keeper]
+
+    - name: Show apisix-models/apisix.yaml diff (plan)
+      ansible.builtin.include_role:
+        name: ai_ops
+        tasks_from: prepare-file
+        apply:
+          tags: [deploy-response-keeper]
+      vars:
+        ai_file_label: apisix-models/apisix.yaml
+        ai_file_local: "{{ playbook_dir }}/../apisix-models/apisix.yaml"
+        ai_file_remote: "{{ ai_ops_deploy_root }}/apisix-models/apisix.yaml"
+      when: ai_ops_mode == "plan"
+      tags: [deploy-response-keeper]
+
+    - name: Require approved response-keeper digest for apply
+      ansible.builtin.assert:
+        that:
+          - ai_ops_response_keeper_approved_digest | length > 0
+          - ai_ops_response_keeper_approved_digest == _rk_desired_image.split('@')[-1]
+        fail_msg: >-
+          response-keeper digest is not approved or became stale. Run plan mode, then apply with
+          -e ai_ops_response_keeper_approved_digest={{ _rk_desired_image.split('@')[-1] }}
+      when: ai_ops_mode != "plan"
+      tags: [deploy-response-keeper]
+
+    - name: Pull the approved response-keeper digest before any mutation
+      ansible.builtin.command: "{{ _runtime }} pull {{ _rk_desired_image }}"
+      when: ai_ops_mode != "plan"
+      tags: [deploy-response-keeper]
+
+    - name: Resolve pulled response-keeper image ID
+      ansible.builtin.command:
+        argv: ["{{ _runtime }}", image, inspect, '--format={{ "{{.Id}}" }}', "{{ _rk_desired_image }}"]
+      register: _rk_pulled_id
+      changed_when: false
+      when: ai_ops_mode != "plan"
+      tags: [deploy-response-keeper]
+
+    - name: Deploy compose.yaml (response-keeper scoped)
+      ansible.builtin.include_role:
+        name: ai_ops
+        tasks_from: deploy-file
+        apply:
+          tags: [deploy-response-keeper]
+      vars:
+        ai_file_label: compose.yaml
+        ai_file_local: "{{ ai_ops_config_dir }}/compose.yaml"
+        ai_file_remote: "{{ ai_ops_deploy_root }}/compose.yaml"
+      tags: [deploy-response-keeper]
+
+    - name: Deploy .env (response-keeper scoped)
+      ansible.builtin.include_role:
+        name: ai_ops
+        tasks_from: deploy-file
+        apply:
+          tags: [deploy-response-keeper]
+      vars:
+        ai_file_label: .env
+        ai_file_local: "{{ ai_ops_config_dir }}/.env"
+        ai_file_remote: "{{ ai_ops_deploy_root }}/.env"
+      no_log: true  # .env may contain credentials; never log its content/diff
+      tags: [deploy-response-keeper]
+
+    - name: Start response-keeper
+      ansible.builtin.command: "{{ _compose }} up -d --no-deps --no-build --pull never response-keeper"
+      when: ai_ops_mode != "plan"
+      tags: [deploy-response-keeper]
+
+    - name: Deploy apisix-models/apisix.yaml (adds /rk routes)
+      ansible.builtin.include_role:
+        name: ai_ops
+        tasks_from: deploy-file
+        apply:
+          tags: [deploy-response-keeper]
+      vars:
+        ai_file_label: apisix-models/apisix.yaml
+        ai_file_local: "{{ playbook_dir }}/../apisix-models/apisix.yaml"
+        ai_file_remote: "{{ ai_ops_deploy_root }}/apisix-models/apisix.yaml"
+        # bind-mounted template rendered at start; recreate to load the new routes
+        ai_activate_cmd: "{{ _compose }} up -d --force-recreate --no-deps --no-build apisix-models"
+        ai_verify_tasks: verify-response-keeper.yml
+        ai_verify_expected_image_identity: "{{ _rk_pulled_id.stdout | default('') | trim }}"
+        ai_verify_expected_revision: "{{ ai_ops_response_keeper_expected_revision }}"
+        ai_recovery_expected_image_identity: ""
+        ai_recovery_expected_revision: ""
+      when: ai_ops_mode != "plan"
+      tags: [deploy-response-keeper]
+
+    # Always re-verify (idempotent); _ai_upload leaks across deploy-file includes.
+    - name: Verify response-keeper and /rk route
+      ansible.builtin.include_role:
+        name: ai_ops
+        tasks_from: verify-response-keeper
+      vars:
+        _ai_verify_expected_image_identity: "{{ _rk_pulled_id.stdout | trim }}"
+        _ai_verify_expected_revision: "{{ ai_ops_response_keeper_expected_revision }}"
+      when: ai_ops_mode != "plan"
+      tags: [deploy-response-keeper]
+
+    # Sub2API reads GATEWAY_OPENAI_WS_INGRESS_PREVIOUS_RESPONSE_RECOVERY_ENABLED only
+    # at start; recreate drops live WS sessions once (clients reconnect).
+    - name: Recreate sub2api to apply WS recovery env
+      ansible.builtin.command: "{{ _compose }} up -d --no-deps --no-build sub2api"
+      when: ai_ops_mode != "plan"
+      tags: [deploy-response-keeper]
+
+    - name: Wait for sub2api health
+      ansible.builtin.command: "{{ _compose }} ps --format json sub2api"
+      register: _rk_sub2api_ps
+      changed_when: false
+      retries: 30
+      delay: 3
+      until: "'healthy' in _rk_sub2api_ps.stdout and 'unhealthy' not in _rk_sub2api_ps.stdout"
+      when: ai_ops_mode != "plan"
+      tags: [deploy-response-keeper]
+
+    - name: Write sanitized response-keeper receipt
+      ansible.builtin.copy:
+        dest: "{{ ai_ops_deploy_root }}/.ai-ops-state/receipt-response-keeper-{{ lookup('ansible.builtin.pipe', 'date +%s') }}.txt"
+        mode: "0600"
+        content: |
+          operation=response-keeper-deploy mode={{ ai_ops_mode }}
+          desired_image={{ _rk_desired_image }}
+          verified_container={{ ai_response_keeper_verified_container | default('') }}
+          verified_image={{ ai_response_keeper_verified_image | default('') }}
+      when: ai_ops_mode != "plan"
+      tags: [deploy-response-keeper]
 
     # ======================= deploy-model-sync =======================
     - name: Deploy approved model-sync policy

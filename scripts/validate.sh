@@ -407,6 +407,21 @@ if selector_service.get("ports") or selector_service.get("network_mode") != "ser
 if "/opt/apisix/custom/routing_selector.lua" not in volume_targets(selector_service):
     raise SystemExit("catalog routing selector module must be mounted read-only into APISIX")
 
+# response-keeper is a loopback-only sidecar in the selector namespace; it owns
+# no network edge and only reaches the selector on 127.0.0.1:9080.
+keeper = services.get("response-keeper", {})
+keeper_env = keeper.get("environment") or {}
+if keeper.get("network_mode") != "service:apisix-models-netns" or keeper.get("ports") or keeper.get("networks"):
+    raise SystemExit("response-keeper must share only the apisix-models namespace without ports")
+if keeper_env.get("UPSTREAM_URL") != "http://127.0.0.1:9080" or keeper_env.get("LISTEN_ADDR") != "127.0.0.1:8085" or str(keeper_env.get("REQUIRE_NO_DEFAULT_ROUTE")) != "true":
+    raise SystemExit("response-keeper must listen on loopback and loop back to the selector")
+if str(keeper.get("user")) != "65534:65534" or keeper.get("read_only") is not True or {str(cap).upper() for cap in keeper.get("cap_drop", [])} != {"ALL"} or keeper.get("cap_add"):
+    raise SystemExit("response-keeper must be non-root/read-only and drop all capabilities")
+if "no-new-privileges:true" not in keeper.get("security_opt", []) or not keeper.get("mem_limit") or not keeper.get("pids_limit"):
+    raise SystemExit("response-keeper must set no-new-privileges and resource limits")
+if (sub2api_env := services.get("sub2api", {}).get("environment") or {}).get("GATEWAY_OPENAI_WS_INGRESS_PREVIOUS_RESPONSE_RECOVERY_ENABLED") is None:
+    raise SystemExit("Sub2API must pin WS previous_response recovery explicitly for response-keeper")
+
 if service_networks(status_service) != {"aisix-status-admin"}:
     raise SystemExit("AISIX status renderer must attach only to aisix-status-admin")
 if network_members.get("aisix-status-admin") != {"aisix-netns", "aisix-status"}:
@@ -674,6 +689,16 @@ if "__CPA_API_KEY__" in edits or text.count("__CPA_API_KEY__") != 1 or selector.
     raise SystemExit("CPA service credential placeholder must occur only at the selector boundary")
 if '  - id: aisix\n' not in text or '      "aisix:3000": 1' not in text:
     raise SystemExit("catalog selector AISIX upstream is missing")
+keeper_route = route("response-keeper-responses")
+for required in ("uri: /rk/v1/responses", "      - GET\n      - POST", "priority: 110", "enable_websocket: true", "uri: /v1/responses", "upstream_id: response-keeper", "disable_proxy_buffering: true"):
+    if required not in keeper_route:
+        raise SystemExit(f"incomplete response-keeper route: {required}")
+keeper_rest = route("response-keeper-passthrough")
+for required in ("uri: /rk/*", "priority: 105", 'regex_uri: ["^/rk(/.*)$", "$1"]', "upstream_id: self", "enable_websocket: true"):
+    if required not in keeper_rest:
+        raise SystemExit(f"incomplete response-keeper passthrough route: {required}")
+if '      "127.0.0.1:8085": 1' not in text or '      "127.0.0.1:9080": 1' not in text:
+    raise SystemExit("response-keeper loopback upstreams are missing")
 PY
 
 apisix_image=$(value_from_env APISIX_IMAGE)

@@ -362,6 +362,8 @@ services:
       GATEWAY_LOG_UPSTREAM_ERROR_BODY: ${GATEWAY_LOG_UPSTREAM_ERROR_BODY:-true}
       GATEWAY_LOG_UPSTREAM_ERROR_BODY_MAX_BYTES: ${GATEWAY_LOG_UPSTREAM_ERROR_BODY_MAX_BYTES:-8192}
       GATEWAY_OPENAI_WS_MODE_ROUTER_V2_ENABLED: ${GATEWAY_OPENAI_WS_MODE_ROUTER_V2_ENABLED:-false}
+      # 保留previous_response_not_found给客户端整史重试；Sub2API自恢复会静默丢上下文。
+      GATEWAY_OPENAI_WS_INGRESS_PREVIOUS_RESPONSE_RECOVERY_ENABLED: ${GATEWAY_OPENAI_WS_INGRESS_PREVIOUS_RESPONSE_RECOVERY_ENABLED:-false}
       LOG_ROTATION_MAX_SIZE_MB: ${LOG_ROTATION_MAX_SIZE_MB:-20}
       LOG_ROTATION_MAX_BACKUPS: ${LOG_ROTATION_MAX_BACKUPS:-5}
       LOG_ROTATION_MAX_AGE_DAYS: ${LOG_ROTATION_MAX_AGE_DAYS:-7}
@@ -643,6 +645,36 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+
+  # 只服务base_url为.../rk/v1的账号；回环到同命名空间apisix-models:9080选路器。
+  response-keeper:
+    build:
+      context: ./middleware/response-keeper
+    image: ${RESPONSE_KEEPER_IMAGE:-ghcr.io/xz-dev/response-keeper:d5f790a3d6a2895af3e6207913840daf997f9bb8@sha256:179b439c56e94bd6ce764e20dbec2d032a6bdcc1ef433b2b0afb9afd015b934e}
+    pull_policy: build
+    user: "65534:65534"
+    network_mode: service:apisix-models-netns
+    restart: unless-stopped
+    depends_on:
+      apisix-models-netns: {condition: service_started, restart: true}
+    pids_limit: 64
+    mem_limit: 96m
+    cpus: 0.5
+    read_only: true
+    cap_drop: [ALL]
+    logging: *default-logging
+    security_opt: [no-new-privileges:true]
+    environment:
+      UPSTREAM_URL: http://127.0.0.1:9080
+      LISTEN_ADDR: 127.0.0.1:8085
+      STORE_TTL: ${RESPONSE_KEEPER_STORE_TTL:-10m}
+      STORE_MAX_BYTES: ${RESPONSE_KEEPER_STORE_MAX_BYTES:-41943040}
+      REQUIRE_NO_DEFAULT_ROUTE: "true"
+    healthcheck:
+      test: [CMD, /response-keeper, healthcheck]
+      interval: 30s
+      timeout: 3s
+      retries: 3
 
   apisix-models-cpa-relay:
     <<: *socat-relay
