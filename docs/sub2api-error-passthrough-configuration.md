@@ -43,7 +43,7 @@ sub2api 默认把所有上游失败映射成通用 502/`upstream_error`，真实
 | name | `openai-4xx-passthrough` |
 | enabled | `true` |
 | priority | `10` |
-| error_codes | `[400, 404, 409, 422]` |
+| error_codes | `[404, 409, 422]`（**不含 400**，见下） |
 | keywords | `[]` |
 | match_mode | `any` |
 | platforms | `["openai"]` |
@@ -54,7 +54,16 @@ sub2api 默认把所有上游失败映射成通用 502/`upstream_error`，真实
 | skip_monitoring | `false`（保留 ops 记录，便于追踪） |
 
 **为什么不透传 401/403**：上游凭证问题属于网关内部，不应暴露给客户端。
-**为什么不透传 429**：sub2api 自己做 failover/退避，透传会破坏调度语义。
+**为什么不透传 429**：sub2api 自己做 failover/退避，透传会破坏调度语义（规则 1 另行覆盖 429/5xx）。
+
+**为什么不含 400（2026-10-18 改）**：v0.2.16 起 sub2api 原生把上游 400 当确定性客户端错误
+（`isOpenAIDeterministicClientError` → `writeOpenAIUpstreamClientError`），保留 `type/code/param`。
+规则在原生分支**之前**生效，且规则只写 `{type:upstream_error, message}`，会把
+`code=previous_response_not_found` 等抹掉——response-keeper 丢上下文后客户端靠这个 code 才知道要
+重发完整历史。所以 400 交给原生分支，规则只兜原生会归一成 502 的 404/409/422。
+
+**账号侧配合**：keeper 路径账号不要开 `extra.openai_passthrough`——passthrough 模式的错误处理
+（`handleErrorResponsePassthrough`）无视规则、把所有 4xx 归一成 `Upstream request failed`。
 
 ## 配置方法
 
@@ -80,7 +89,7 @@ curl -X POST https://<gateway-host>:8086/api/v1/admin/error-passthrough-rules \
     "name": "openai-4xx-passthrough",
     "enabled": true,
     "priority": 10,
-    "error_codes": [400, 404, 409, 422],
+    "error_codes": [404, 409, 422],
     "keywords": [],
     "match_mode": "any",
     "platforms": ["openai"],
@@ -102,7 +111,7 @@ INSERT INTO error_passthrough_rules
    passthrough_code, response_code, passthrough_body, custom_message,
    skip_monitoring, description, created_at, updated_at)
 VALUES
-  ('openai-4xx-passthrough', true, 10, '{400,404,409,422}', '{}', 'any', '{openai}',
+  ('openai-4xx-passthrough', true, 10, '{404,409,422}', '{}', 'any', '{openai}',
    true, NULL, true, NULL,
    false, 'Passthrough deterministic 4xx from CPA/Kimi upstreams', NOW(), NOW());"
 ```
@@ -115,9 +124,10 @@ VALUES
 pi-retry 重试 10 次全部同样失败                        ← 无效重试
 ```
 
-配置后预期：
+配置后预期（400 由 v0.2.16 原生分支保留，404/409/422 由规则透传）：
 ```
 客户端收到: invalid_request_error / 400 / "Invalid request: text content is empty"
+客户端收到: invalid_request_error / 400 / code=previous_response_not_found（keeper 丢上下文）
 ```
 
 验证步骤：
@@ -138,8 +148,9 @@ pi-retry 重试 10 次全部同样失败                        ← 无效重试
 
 ## 注意事项
 
-- 规则**只影响 failover 耗尽后的兜底错误**（`handleFailoverExhausted` 路径），流式中途错误
-  另有 `codexFailureTerminal` 机制，不受此配置控制。
+- 规则作用于两处：不 failover 的直接错误（`handleErrorResponse`，先于原生 400 分支）与
+  failover 耗尽后的兜底（`handleFailoverExhausted`）。流式中途错误另有 `codexFailureTerminal`
+  机制，不受此配置控制。账号开 `openai_passthrough` 时规则整体不生效。
 - `skip_monitoring=false` 时错误仍进 `ops_error_logs`，不影响排障。
 - 规则改动即时生效，无需重启。
 - 生产 .env / compose 已开 `GATEWAY_LOG_UPSTREAM_ERROR_BODY=true`（8KB），与规则互补：
