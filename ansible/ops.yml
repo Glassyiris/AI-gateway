@@ -6,6 +6,7 @@
 #   ansible-playbook ops.yml --tags deploy-aisix      [-e ai_ops_mode=plan]
 #   ansible-playbook ops.yml --tags deploy-model-sync  [-e ai_ops_mode=plan]
 #   ansible-playbook ops.yml --tags deploy-response-keeper [-e ai_ops_mode=plan]
+#   ansible-playbook ops.yml --tags restart-response-keeper [-e ai_ops_mode=plan]
 #   ansible-playbook ops.yml --tags rollback-model-sync
 #   ansible-playbook ops.yml --tags rollback           -e service=cli-proxy-api
 #
@@ -873,6 +874,49 @@
           verified_image={{ ai_response_keeper_verified_image | default('') }}
       when: ai_ops_mode != "plan"
       tags: [deploy-response-keeper]
+
+    # ======================= restart-response-keeper =======================
+    # Restart only the keeper container: clears its in-memory response state
+    # (TTL store, no persistence). Image, .env, apisix-models and sub2api are
+    # untouched; clients recover lost references with one full-history repair.
+    - name: Read current response-keeper container (restart plan)
+      ansible.builtin.command: "{{ _compose }} ps -q response-keeper"
+      register: _rk_restart_before
+      changed_when: false
+      failed_when: _rk_restart_before.rc != 0 or _rk_restart_before.stdout | trim == ""
+      tags: [restart-response-keeper]
+
+    - name: Show response-keeper restart plan
+      ansible.builtin.debug:
+        msg:
+          container: "{{ _rk_restart_before.stdout | trim }}"
+          action: "restart response-keeper only (in-memory state cleared)"
+      tags: [restart-response-keeper]
+
+    - name: Restart response-keeper
+      ansible.builtin.command: "{{ _compose }} restart response-keeper"
+      when: ai_ops_mode != "plan"
+      tags: [restart-response-keeper]
+
+    - name: Verify restarted response-keeper and /rk route
+      ansible.builtin.include_role:
+        name: ai_ops
+        tasks_from: verify-response-keeper
+        apply:
+          tags: [restart-response-keeper]
+      when: ai_ops_mode != "plan"
+      tags: [restart-response-keeper]
+
+    - name: Write sanitized response-keeper restart receipt
+      ansible.builtin.copy:
+        dest: "{{ ai_ops_deploy_root }}/.ai-ops-state/receipt-response-keeper-restart-{{ lookup('ansible.builtin.pipe', 'date +%s') }}.txt"
+        mode: "0600"
+        content: |
+          operation=response-keeper-restart mode={{ ai_ops_mode }}
+          container={{ ai_response_keeper_verified_container | default('') }}
+          image={{ ai_response_keeper_verified_image | default('') }}
+      when: ai_ops_mode != "plan"
+      tags: [restart-response-keeper]
 
     # ======================= deploy-model-sync =======================
     - name: Deploy approved model-sync policy
