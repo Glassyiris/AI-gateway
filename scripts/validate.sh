@@ -286,8 +286,16 @@ services = compose.get("services") or {}
 networks = compose.get("networks") or {}
 if not services or not networks:
     raise SystemExit("Compose must define services and networks")
-if "default" in networks or compose.get("volumes"):
+# Persistent state lives in backed-up data/ binds. The only named volume is
+# keeper's disposable history cache (cleared on start), mounted by keeper alone.
+ALLOWED_VOLUMES = {"response-keeper-cache"}
+if "default" in networks or set(compose.get("volumes") or {}) - ALLOWED_VOLUMES:
     raise SystemExit("default network and named persistent volumes are forbidden")
+for service, config in services.items():
+    for volume in config.get("volumes", []):
+        source = volume.get("source") if isinstance(volume, dict) else str(volume).split(":")[0]
+        if source in ALLOWED_VOLUMES and service != "response-keeper":
+            raise SystemExit(f"{service} must not mount the keeper cache volume")
 
 def service_networks(config):
     value = config.get("networks") or {}
@@ -413,8 +421,21 @@ keeper = services.get("response-keeper", {})
 keeper_env = keeper.get("environment") or {}
 if keeper.get("network_mode") != "service:apisix-models-netns" or keeper.get("ports") or keeper.get("networks"):
     raise SystemExit("response-keeper must share only the apisix-models namespace without ports")
-if keeper_env.get("UPSTREAM_URL") != "http://127.0.0.1:9080" or keeper_env.get("LISTEN_ADDR") != "127.0.0.1:8085" or str(keeper_env.get("REQUIRE_NO_DEFAULT_ROUTE")) != "true":
-    raise SystemExit("response-keeper must listen on loopback and loop back to the selector")
+# Routed mode: keeper selects CPA/AISIX itself and never loops back to apisix-models:9080.
+keeper_routed = {
+    "ROUTING_INDEX_URL": "http://models-enricher:8090/routing-index",
+    "UPSTREAM_CPA_URL": "http://cpa:8317",
+    "UPSTREAM_AISIX_URL": "http://aisix:3000",
+    "LISTEN_ADDR": "127.0.0.1:8085",
+    "STORE_DIR": "/var/tmp/response-keeper",
+}
+if any(keeper_env.get(k) != v for k, v in keeper_routed.items()) or "UPSTREAM_URL" in keeper_env \
+        or not keeper_env.get("CPA_API_KEY") \
+        or keeper_env.get("CPA_API_KEY") != (services.get("apisix-models", {}).get("environment") or {}).get("CPA_API_KEY") \
+        or str(keeper_env.get("REQUIRE_NO_DEFAULT_ROUTE")) != "true":
+    raise SystemExit("response-keeper must listen on loopback in routed mode with direct CPA/AISIX upstreams")
+if "response-keeper-cache:/var/tmp/response-keeper" not in [str(v) for v in keeper.get("volumes", [])]:
+    raise SystemExit("response-keeper must keep its disposable cache on the response-keeper-cache volume")
 if str(keeper.get("user")) != "65534:65534" or keeper.get("read_only") is not True or {str(cap).upper() for cap in keeper.get("cap_drop", [])} != {"ALL"} or keeper.get("cap_add"):
     raise SystemExit("response-keeper must be non-root/read-only and drop all capabilities")
 if "no-new-privileges:true" not in keeper.get("security_opt", []) or not keeper.get("mem_limit") or not keeper.get("pids_limit"):
@@ -660,13 +681,15 @@ def route(route_id):
 selector = route("catalog-routing-selector")
 for required in (
     "priority: 100",
-    "      - /v1/chat/completions\n      - /v1/responses\n      - /v1/images/generations",
+    "      - /v1/chat/completions\n      - /v1/images/generations",
     "      - POST",
     'require("routing_selector").run(_, ctx, "__CPA_API_KEY__")',
     "disable_proxy_buffering: true",
 ):
     if required not in selector:
         raise SystemExit(f"incomplete catalog routing selector: {required}")
+if "/v1/responses" in selector:
+    raise SystemExit("Responses must route to response-keeper, not the Lua catalog selector")
 for forbidden in ("ai-proxy-multi", "alias-gpt-", "alias-grok-", "alias-team-"):
     if forbidden in text:
         raise SystemExit(f"legacy HTTP alias still conflicts with catalog selection: {forbidden}")
@@ -690,9 +713,13 @@ if "__CPA_API_KEY__" in edits or text.count("__CPA_API_KEY__") != 1 or selector.
 if '  - id: aisix\n' not in text or '      "aisix:3000": 1' not in text:
     raise SystemExit("catalog selector AISIX upstream is missing")
 keeper_route = route("response-keeper-responses")
-for required in ("uri: /rk/v1/responses", "      - GET\n      - POST", "priority: 110", "enable_websocket: true", "uri: /v1/responses", "upstream_id: response-keeper", "disable_proxy_buffering: true"):
+for required in ("      - /v1/responses\n      - /rk/v1/responses", "      - GET\n      - POST", "priority: 110", "enable_websocket: true", "uri: /v1/responses", "upstream_id: response-keeper", "disable_proxy_buffering: true", "max_body_size: 33554432"):
     if required not in keeper_route:
         raise SystemExit(f"incomplete response-keeper route: {required}")
+if "serverless" in keeper_route or "upstream_id: self" in keeper_route:
+    raise SystemExit("response-keeper route must not read the body or loop back to apisix-models")
+if 'max_body_size: 16777216' not in text or '["route_id", "~=", "response-keeper-responses"]' not in text:
+    raise SystemExit("non-Responses routes must keep the 16 MiB body limit")
 keeper_rest = route("response-keeper-passthrough")
 for required in ("uri: /rk/*", "priority: 105", 'regex_uri: ["^/rk(/.*)$", "$1"]', "upstream_id: self", "enable_websocket: true"):
     if required not in keeper_rest:

@@ -648,11 +648,11 @@ services:
       retries: 3
       start_period: 20s
 
-  # 只服务base_url为.../rk/v1的账号；回环到同命名空间apisix-models:9080选路器。
+  # 承接全部Responses（/v1/responses与/rk/v1/responses）；按模型直连CPA或AISIX，不再回环apisix-models:9080。
   response-keeper:
     build:
       context: ./middleware/response-keeper
-    image: ${RESPONSE_KEEPER_IMAGE:-ghcr.io/xz-dev/response-keeper:d5f790a3d6a2895af3e6207913840daf997f9bb8@sha256:179b439c56e94bd6ce764e20dbec2d032a6bdcc1ef433b2b0afb9afd015b934e}
+    image: ${RESPONSE_KEEPER_IMAGE:-ghcr.io/xz-dev/response-keeper:2d269bc11ec8c1b58040a8f03f3cd5763f5c41c1@sha256:74b3213b791952994785502357024fc79ed138ee68a541978a853efc9c1708de}
     pull_policy: build
     user: "65534:65534"
     network_mode: service:apisix-models-netns
@@ -666,9 +666,18 @@ services:
     cap_drop: [ALL]
     logging: *default-logging
     security_opt: [no-new-privileges:true]
+    volumes:
+      # Disposable cache on a real disk volume, never tmpfs; restart persistence is not required.
+      - response-keeper-cache:/var/tmp/response-keeper
     environment:
-      UPSTREAM_URL: http://127.0.0.1:9080
+      # 每轮按routing-index选CPA或AISIX；CPA用服务密钥，AISIX保留调用方凭证。
+      ROUTING_INDEX_URL: http://models-enricher:8090/routing-index
+      UPSTREAM_CPA_URL: http://cpa:8317
+      UPSTREAM_AISIX_URL: http://aisix:3000
+      CPA_API_KEY: ${CPA_API_KEY:?Set CPA_API_KEY in .env}
       LISTEN_ADDR: 127.0.0.1:8085
+      STORE_DIR: /var/tmp/response-keeper
+      GOMEMLIMIT: ${RESPONSE_KEEPER_GOMEMLIMIT:-256MiB}
       STORE_TTL: ${RESPONSE_KEEPER_STORE_TTL:-10m}
       STORE_MAX_BYTES: ${RESPONSE_KEEPER_STORE_MAX_BYTES:-41943040}
       REQUIRE_NO_DEFAULT_ROUTE: "true"
@@ -955,6 +964,9 @@ services:
         ipv4_address: 172.30.7.2
       cloudflare-egress:
         gw_priority: 1
+
+volumes:
+  response-keeper-cache: {}
 
 networks:
   apisix-models-aisix:

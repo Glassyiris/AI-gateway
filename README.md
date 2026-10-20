@@ -23,7 +23,7 @@ The Rust sidecar manages only the five supported API-key kinds through CPA's int
 Management API. Gemini/Interactions retain Go inventory behavior; Go metadata,
 OAuth/native visibility, static aliases and downstream authorization remain separate.
 
-Reusable Docker Compose stack for [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), [Sub2API](https://github.com/Wei-Shaw/sub2api), [AISIX](https://github.com/api7/aisix), [Apache APISIX](https://apisix.apache.org/), [ai-sse-keepalive-proxy](https://github.com/xz-dev/ai-sse-keepalive-proxy), [Squid](https://www.squid-cache.org/), [socat](http://www.dest-unreach.org/socat/), and [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/).
+Reusable Docker Compose stack for [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), [Sub2API](https://github.com/Wei-Shaw/sub2api), [AISIX](https://github.com/api7/aisix), [Apache APISIX](https://apisix.apache.org/), [ai-sse-keepalive-proxy](https://github.com/xz-dev/ai-sse-keepalive-proxy), [response-keeper](https://github.com/xz-dev/response-keeper), [Squid](https://www.squid-cache.org/), [socat](http://www.dest-unreach.org/socat/), and [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/).
 
 It separates provider credentials, client API-key authority, logical-model routing, public routing, and Internet ingress:
 
@@ -34,11 +34,15 @@ flowchart LR
   cloudflared --> APISIX[APISIX front door]
   APISIX --> Keepalive[AI SSE keepalive proxy]
   Keepalive --> Sub2API
-  Sub2API --> AISIX
-  AISIX --> CPA[CLIProxyAPI]
-  Sub2API -->|WebSocket| Models[apisix-models internal APISIX]
-  Models --> CPA
-  Models -->|/v1/images/edits| AISIX
+  Sub2API -->|cli-proxy-api:8317 relay| Models[apisix-models internal APISIX]
+  Models -->|/v1/responses, /rk/v1/responses<br/>HTTP + WebSocket| Keeper[response-keeper]
+  Keeper -->|routing-index lookup| Enricher
+  Keeper -->|per turn| CPA[CLIProxyAPI]
+  Keeper -->|per turn| AISIX
+  Models -->|chat/images: catalog selector| CPA
+  Models -->|chat/images: catalog selector| AISIX
+  Sub2API -->|AISIX accounts| AISIX
+  AISIX --> CPA
   APISIX -->|versioned /v1/models| Sidecar[model-catalog-sidecar]
   Operator[Operator via localhost/Tailscale] -->|/models-table| Sidecar
   Operator -->|/status| Status
@@ -250,7 +254,33 @@ Override the built-in provider in the user's private `~/.pi/agent/models.json`:
 
 The higher-priority APISIX Codex Responses route matches only that marker plus a nonempty `x-api-key`. It removes the parse-only `Authorization` and marker before proxying; it neither stores nor validates the credential. Sub2API remains the sole API-key authority and authenticates `x-api-key`. Requests missing either header fail closed through the normal opaque public response policy. The same `/backend-api/codex/responses` path handles POST/SSE and GET/WebSocket.
 
-Set `GATEWAY_OPENAI_WS_MODE_ROUTER_V2_ENABLED=true` only after enabling a reviewed WebSocket mode on the corresponding Sub2API account. In Pi settings, `transport: "websocket"` reuses one connection while sending full context and is the supported mode for the current CPA-backed path. `transport: "websocket-cached"` sends `previous_response_id` plus only the new input delta; current CPA upstreams do not emit reusable `resp_*` IDs, so this implicit continuation mode is not supported yet. `transport: "sse"` remains the explicit HTTP streaming mode.
+Set `GATEWAY_OPENAI_WS_MODE_ROUTER_V2_ENABLED=true` only after enabling a reviewed WebSocket mode on the corresponding Sub2API account. In Pi settings, `transport: "websocket"` reuses one connection while sending full context and is the supported mode for the current CPA-backed path. `transport: "websocket-cached"` sends `previous_response_id` plus only the new input delta; response-keeper stores history and returns reusable `resp_*` IDs for this path, and the OpenAI Responses extension can carry a server-confirmed continuation across socket reconnects. Keeper state is not persisted, so after a keeper restart the client receives `previous_response_not_found` and resends full history once. `transport: "sse"` remains the explicit HTTP streaming mode.
+
+### Responses path through response-keeper
+
+Every OpenAI Responses turn that reaches `apisix-models` goes through [response-keeper](https://github.com/xz-dev/response-keeper), a sidecar in the `apisix-models` network namespace listening on `127.0.0.1:8085`:
+
+```text
+Sub2API -> cli-proxy-api:8317 relay -> apisix-models (/v1/responses, /rk/v1/responses) -> response-keeper -> CPA or AISIX
+```
+
+- **One traversal.** Both `/v1/responses` and `/rk/v1/responses` (POST, SSE and WebSocket) route straight to keeper without any body-reading plugin. Keeper calls `cpa:8317` or `aisix:3000` itself; Responses never loop back to `apisix-models:9080`. `/rk/*` paths other than Responses still pass through to the normal routes.
+- **Per-turn routing.** Keeper looks up the original top-level `model` at `models-enricher:8090/routing-index` once per HTTP request or WebSocket turn, with a 1.6 s overall limit and no cross-backend retry. A recent authoritative `cpa`/`aisix` answer is kept for 15 minutes and used only when the index is unreachable; `not_found` returns `404 model_not_found` and `unavailable` or a cold miss returns `503`.
+- **Credentials.** CPA receives `Authorization: Bearer ${CPA_API_KEY}`; AISIX receives the caller's original header. History ownership always derives from the caller's credential, so one caller cannot continue another's `previous_response_id`.
+- **History.** Keeper expands `previous_response_id` from a disposable, deduplicated bbolt cache on the named volume `response-keeper-cache` (`STORE_DIR=/var/tmp/response-keeper`, real disk, never tmpfs). Nothing survives a restart; clients then receive `previous_response_not_found` and resend full history once. It also removes top-level `prompt_cache_retention`.
+- **Limits.** Responses routes accept bodies up to 32 MiB (keeper's own request limit). Other `apisix-models` routes keep 16 MiB through a global `client-control` rule; nginx `client_max_body_size` is 32m, so `apisix-models/apisix.yaml` and `config.yaml` must be deployed and rolled back together.
+- **Chat and images.** `/v1/chat/completions` and `/v1/images/generations` still use the Lua catalog selector (`apisix-models/routing_selector.lua`) with the same 15-minute last-known-good fallback in the `routing_lkg` shared dict.
+
+Deploy keeper and these routes only with the scoped tag, which recreates `response-keeper` and `apisix-models` and nothing else:
+
+```bash
+ansible-playbook ops.yml --tags deploy-responses-path -e ai_ops_mode=plan
+ansible-playbook ops.yml --tags deploy-responses-path \
+  -e ai_ops_response_keeper_approved_digest=sha256:<index digest> \
+  -e ai_ops_response_keeper_expected_revision=<keeper commit>
+```
+
+Apply snapshots the previous files and keeper image selector to `.rollback/responses-path-<UTC>/`, verifies both aliases are answered by keeper, that no Responses access line targets `127.0.0.1:9080` and that every other container ID is unchanged, and restores the snapshot on failure. The legacy `deploy-response-keeper` tag also recreates Sub2API; do not use it for this topology.
 
 ### Optional provider-sidecar
 

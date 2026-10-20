@@ -23,7 +23,7 @@ upstreams:
       connect: 3600
       send: 3600
       read: 3600
-  # response-keeper边车共享本命名空间；它把请求再送回本机9080的选路器。
+  # response-keeper共享本命名空间，逐turn选路后直连CPA/AISIX，不回到9080。
   - id: response-keeper
     type: roundrobin
     nodes:
@@ -41,16 +41,30 @@ upstreams:
       send: 3600
       read: 3600
 
+# 保留其他路由原16MiB上限；Responses按自己的32MiB配置处理，不读body。
+global_rules:
+  - id: non-responses-body-limit
+    plugins:
+      client-control:
+        max_body_size: 16777216
+        _meta:
+          filter:
+            - ["route_id", "~=", "response-keeper-responses"]
+
 routes:
-  # 仅base_url为.../rk/v1的账号经过response-keeper；其余账号路径不变，可逐账号切换与回退。
+  # 两种Responses入口统一经过keeper；此路由不读取或解析请求body。
   - id: response-keeper-responses
-    uri: /rk/v1/responses
+    uris:
+      - /v1/responses
+      - /rk/v1/responses
     methods:
       - GET
       - POST
     priority: 110
     enable_websocket: true
     plugins:
+      client-control:
+        max_body_size: 33554432
       proxy-buffering:
         disable_proxy_buffering: true
       proxy-rewrite:
@@ -71,7 +85,6 @@ routes:
   - id: catalog-routing-selector
     uris:
       - /v1/chat/completions
-      - /v1/responses
       - /v1/images/generations
     methods:
       - POST
