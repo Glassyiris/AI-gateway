@@ -1,5 +1,5 @@
 server {
-    listen 8080;
+    listen 172.30.41.3:8080;
     server_name _;
 
     # 边车仅暴露目录读取与诊断强刷 path；其余一律 444。

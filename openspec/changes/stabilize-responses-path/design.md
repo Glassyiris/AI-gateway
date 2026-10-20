@@ -8,7 +8,7 @@ Sub2API ──socat──► apisix-models :9080
    /v1/responses    ──► routing_selector ──► cpa | aisix          (non-/rk accounts; today none)
 ```
 
-- keeper runs with `network_mode: service:apisix-models-netns`. It shares apisix's network namespace, so it already resolves `cpa` (extra_hosts → 172.30.35.3 relay), `models-enricher` (172.30.27.3 relay) and `aisix:3000` (network `apisix-models-aisix`). No new networks or relays are needed.
+- keeper runs with `network_mode: service:apisix-models-netns`. It shares apisix's network namespace, so it already resolves `cpa` (extra_hosts → 172.30.35.3 relay), `models-enricher` (172.30.27.3 relay) and `aisix:3000` (relay `apisix-models-aisix-relay`, 172.30.70.3). No new networks or relays are needed for keeper itself.
 - `routing_selector.run` does four things: reads and JSON-decodes the body (≤16 MiB), looks up `/routing-index`, strips `prompt_cache_retention`, and sets `Authorization: Bearer <CPA_API_KEY>` only for CPA. AISIX keeps the caller's credential.
 - `catch-all` also strips `prompt_cache_retention`, but APISIX's WebSocket proxy skips body plugins, so WebSocket frames are not stripped today.
 - The keeper owner scope is `sha256(Authorization)` as received. Today keeper receives Sub2API's account key, before the selector substitutes the CPA key.

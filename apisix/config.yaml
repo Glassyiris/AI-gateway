@@ -1,9 +1,18 @@
 apisix:
+  # Bind only the inbound relay targets: healthcheck, host relay target, cloudflared relay target.
   node_listen:
-    - 9080
+    - ip: 127.0.0.1
+      port: 9080
+    - ip: 172.30.6.2
+      port: 9080
+    - ip: 172.30.8.2
+      port: 9080
   enable_admin: false
   enable_control: false
   enable_ipv6: false
+  # No certificate is configured and TLS ends at Cloudflare; do not open 9443.
+  ssl:
+    enable: false
   extra_lua_path: "/opt/apisix/custom/?.lua"
   dns_resolver:
     - 127.0.0.11
@@ -12,6 +21,7 @@ nginx_config:
   worker_processes: 1
   error_log_level: warn
   http_server_configuration_snippet: |
+    early_hints on;
     more_clear_headers X-Client-Request-ID;
     error_page 413 = @payload_too_large;
     location @payload_too_large {

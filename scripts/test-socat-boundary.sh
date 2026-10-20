@@ -58,6 +58,11 @@ source_listener=$(printf live | "${RUNTIME[@]}" exec -i "$relay" socat - TCP4:17
 if "${RUNTIME[@]}" exec "$target" python3 -c 'import socket;socket.create_connection(("172.30.250.2",18082),1)' >/dev/null 2>&1; then
   echo 'target unexpectedly initiated a connection to source' >&2; exit 1
 fi
+# The relay binds only its source-side address, so the target cannot use the
+# relay's target-side address as a reverse entrance.
+if "${RUNTIME[@]}" exec "$target" python3 -c 'import socket;socket.create_connection(("172.30.251.3",18080),1)' >/dev/null 2>&1; then
+  echo 'target unexpectedly reached the relay listener' >&2; exit 1
+fi
 uid=$("${RUNTIME[@]}" exec "$relay" id -u)
 # shellcheck disable=SC2016
 cap=$("${RUNTIME[@]}" exec "$relay" awk '/^CapEff:/{print $2}' /proc/1/status)
@@ -73,4 +78,4 @@ if "${RUNTIME[@]}" exec "$source" python3 -c 'import socket;socket.create_connec
   echo 'source unexpectedly bypassed stopped relay' >&2; exit 1
 fi
 
-echo 'socat_tcp=valid reverse_initiation=blocked relay_bypass=blocked privileges=dropped pairwise_networks=valid'
+echo 'socat_tcp=valid reverse_initiation=blocked target_side_listener=absent relay_bypass=blocked privileges=dropped pairwise_networks=valid'

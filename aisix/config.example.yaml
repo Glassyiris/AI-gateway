@@ -1,5 +1,11 @@
 proxy:
-  addr: 0.0.0.0:3000
+  # Required by AISIX but ignored when `listeners` is set.
+  addr: 172.30.61.2:3000
+  # One listener per one-way relay target; no wildcard bind.
+  listeners:
+    - addr: 172.30.61.2:3000
+    - addr: 172.30.65.2:3000
+    - addr: 172.30.71.2:3000
 resources_file: /etc/aisix/resources.yaml
 admin:
   addr: 172.30.68.2:3002
@@ -7,3 +13,7 @@ admin:
     - replace-with-generated-aisix-admin-key
 observability:
   access_log: true
+  metrics:
+    prometheus:
+      # Read only by aisix-status on the unpublished admin network.
+      addr: 172.30.68.2:9090

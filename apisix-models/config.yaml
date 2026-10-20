@@ -1,9 +1,20 @@
 apisix:
+  # Bind only the inbound relay targets: healthcheck/self, host relay target, Sub2API relay target, catalog bridge target.
   node_listen:
-    - 9080
+    - ip: 127.0.0.1
+      port: 9080
+    - ip: 172.30.34.2
+      port: 9080
+    - ip: 172.30.12.2
+      port: 9080
+    - ip: 172.30.42.2
+      port: 9080
   enable_admin: false
   enable_control: false
   enable_ipv6: false
+  # Internal plaintext selector; do not open the default 9443 TLS listener.
+  ssl:
+    enable: false
   extra_lua_path: "/opt/apisix/custom/?.lua"
   dns_resolver:
     - 127.0.0.11

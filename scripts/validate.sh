@@ -96,6 +96,15 @@ text = Path(sys.argv[1]).read_text(encoding="utf-8")
 match = re.search(r"(?ms)^admin:\s*\n(.*?)(?=^[A-Za-z_][A-Za-z0-9_]*:\s*(?:#.*)?$|\Z)", text)
 if not match or not re.search(r"(?m)^\s+addr:\s*172\.30\.68\.2:3002\s*$", match.group(0)):
     raise SystemExit(f"{sys.argv[1]} must bind AISIX Admin only to 172.30.68.2:3002")
+# Every AISIX listener binds one explicit relay-target/admin address. A wildcard
+# would let each relay peer reach every AISIX port (proxy, Admin, metrics).
+if re.search(r"(?m)^\s*(?:-\s*)?addr:\s*(?:0\.0\.0\.0|\[?::\]?|\*)?:\d+\s*$", text):
+    raise SystemExit(f"{sys.argv[1]} must not bind any AISIX listener to a wildcard address")
+proxy_listeners = set(re.findall(r"(?m)^\s+-\s*addr:\s*(\S+)\s*$", text))
+if proxy_listeners != {"172.30.61.2:3000", "172.30.65.2:3000", "172.30.71.2:3000"}:
+    raise SystemExit(f"{sys.argv[1]} must list exactly the three AISIX relay-target proxy listeners")
+if not re.search(r"(?ms)^\s+prometheus:\s*\n(?:\s+#.*\n)*\s+addr:\s*172\.30\.68\.2:9090\s*$", text):
+    raise SystemExit(f"{sys.argv[1]} must bind AISIX metrics only to 172.30.68.2:9090")
 PY
 tmpdir=$(mktemp -d /tmp/ai-gateway-validate.XXXXXX)
 trap 'rm -rf "$tmpdir"' EXIT
@@ -270,6 +279,7 @@ fi
 
 python3 - "$rendered" "$rendered_format" <<'PY'
 import json
+import re
 import sys
 
 with open(sys.argv[1], encoding="utf-8") as handle:
@@ -340,6 +350,27 @@ def relay_is_hardened(name):
     text = command_text(config)
     return "LISTEN:" in text and ("TCP4:" in text or "OPENSSL-" in text)
 
+def service_ips(config):
+    return {str(value.get("ipv4_address")) for value in (config.get("networks") or {}).values() if isinstance(value, dict) and value.get("ipv4_address")}
+
+# A relay listener must bind its own source-side address. Without bind= socat
+# listens on every interface, so the relay target (or any other peer on the
+# owner's networks) could open connections back through it.
+for service, config in services.items():
+    text = command_text(config)
+    if "LISTEN:" not in text:
+        continue
+    mode = str(config.get("network_mode", ""))
+    owner = services.get(mode.split(":", 1)[1], {}) if mode.startswith("service:") else config
+    owner_ips = service_ips(owner)
+    listeners = re.findall(r"(?:TCP4|OPENSSL)-LISTEN:[^\s\"']+", text)
+    if not listeners:
+        raise SystemExit(f"relay listener is not parseable: {service}")
+    for listener in listeners:
+        bound = re.search(r",bind=([0-9.]+)(?:,|$)", listener)
+        if not bound or bound.group(1) not in owner_ips:
+            raise SystemExit(f"relay listener must bind one own source address: {service}: {listener}")
+
 for service, config in services.items():
     if config.get("privileged") is True:
         raise SystemExit(f"privileged service is forbidden: {service}")
@@ -365,21 +396,18 @@ for service, config in services.items():
 
 network_members = {name: members(name) for name in networks}
 
-# AISIX is the intentional direct-edge exception to the ordinary relay shape.
-# Validate exact namespace-owner membership so a future Compose edit cannot
-# silently widen these pairwise networks or reintroduce an AISIX relay.
-direct_aisix_edges = {
-    "sub2api-aisix": {"sub2api-netns", "aisix-netns"},
-    "aisix-cpa": {"aisix-netns", "cpa-netns"},
-    "enricher-aisix": {"models-enricher-netns", "aisix-netns"},
-    "apisix-models-aisix": {"apisix-models-netns", "aisix-netns"},
+# AISIX has no direct data network: each of its four edges is an ordinary
+# one-way source/target relay pair, checked by the generic edge loop below.
+aisix_edges = {
+    "sub2api-aisix": ("sub2api-netns", "aisix-netns"),
+    "enricher-aisix": ("models-enricher-netns", "aisix-netns"),
+    "apisix-models-aisix": ("apisix-models-netns", "aisix-netns"),
+    "aisix-cpa": ("aisix-netns", "cpa-netns"),
 }
-for name, expected_members in direct_aisix_edges.items():
-    if network_members.get(name) != expected_members:
-        raise SystemExit(f"invalid direct AISIX edge {name}: {sorted(network_members.get(name, set()))}")
-for forbidden in ("aisix-relay", "sub2api-aisix-relay", "aisix-cpa-relay", "enricher-aisix-relay"):
-    if forbidden in services:
-        raise SystemExit(f"AISIX-specific relay is forbidden: {forbidden}")
+for name, (source_owner, target_owner) in aisix_edges.items():
+    relay = f"{name}-relay"
+    if network_members.get(f"{name}-source") != {source_owner, relay} or network_members.get(f"{name}-target") != {relay, target_owner}:
+        raise SystemExit(f"AISIX edge {name} must be a one-way relay pair {source_owner}->{relay}->{target_owner}")
 
 aisix_service = services.get("aisix", {})
 status_service = services.get("aisix-status", {})
@@ -389,7 +417,7 @@ for name, service in (("aisix", aisix_service), ("aisix-status", status_service)
 if aisix_service.get("network_mode") != "service:aisix-netns":
     raise SystemExit("AISIX must share the route-stripped aisix-netns namespace")
 aisix_owner = services.get("aisix-netns", {})
-if service_networks(aisix_owner) != set(direct_aisix_edges) | {"aisix-host-source", "aisix-status-admin"}:
+if service_networks(aisix_owner) != {"aisix-host-source", "aisix-status-admin", "sub2api-aisix-target", "enricher-aisix-target", "apisix-models-aisix-target", "aisix-cpa-source"}:
     raise SystemExit("aisix-netns has an unexpected network membership")
 aisix_ports = aisix_owner.get("ports") or []
 if not aisix_ports:
@@ -472,7 +500,7 @@ status_relay = services.get("aisix-status-relay", {})
 relay_text = command_text(status_relay)
 if status_relay.get("network_mode") != "service:aisix-netns" or not relay_is_hardened("aisix-status-relay"):
     raise SystemExit("AISIX status page must use a hardened relay in the AISIX namespace")
-if "TCP4-LISTEN:3001" not in relay_text or "TCP4:172.30.68.3:8080" not in relay_text:
+if "TCP4-LISTEN:3001,bind=172.30.66.2," not in relay_text or "TCP4:172.30.68.3:8080" not in relay_text:
     raise SystemExit("AISIX status relay must forward only port 3001 to the isolated renderer")
 
 internal_membership_exceptions = {
@@ -739,7 +767,7 @@ PY
 apisix_image=$(value_from_env APISIX_IMAGE)
 [ -n "$apisix_image" ] || apisix_image=docker.io/apache/apisix:3.19.0-debian
 sed 's|__CPA_API_KEY__|fixture-cpa-key|g' "$root/apisix-models/apisix.yaml" >"$tmpdir/apisix-models.yaml"
-"${RUNTIME[@]}" run --rm --network none \
+"${RUNTIME[@]}" run --rm --sysctl net.ipv4.ip_nonlocal_bind=1 --network none \
   -e APISIX_STAND_ALONE=true \
   -v "$root/apisix-models/config.yaml:/usr/local/apisix/conf/config.yaml:ro" \
   -v "$tmpdir/apisix-models.yaml:/usr/local/apisix/conf/apisix.yaml:ro" \
@@ -753,12 +781,29 @@ sed 's|__CPA_API_KEY__|fixture-cpa-key|g' "$root/apisix-models/apisix.yaml" >"$t
   -v "$root/apisix/lua:/work:ro" \
   --entrypoint /usr/local/openresty/bin/resty \
   "$apisix_image" /work/model_list_intersection_test.lua >/dev/null
-"${RUNTIME[@]}" run --rm \
+"${RUNTIME[@]}" run --rm --sysctl net.ipv4.ip_nonlocal_bind=1 \
   -e APISIX_STAND_ALONE=true \
   -v "$root/apisix/config.yaml:/usr/local/apisix/conf/config.yaml:ro" \
   -v "$root/apisix/apisix.yaml:/usr/local/apisix/conf/apisix.yaml:ro" \
   -v "$root/apisix/lua:/opt/apisix/custom:ro" \
   "$apisix_image" apisix test >/dev/null
+# Both data planes must render only explicit relay-target/loopback listeners
+# and no TLS listener (the APISIX default otherwise opens 0.0.0.0:9443).
+for plane in apisix apisix-models; do
+  plane_routes=$root/$plane/apisix.yaml
+  [ "$plane" = apisix ] || plane_routes=$tmpdir/apisix-models.yaml
+  listeners=$("${RUNTIME[@]}" run --rm --network none -e APISIX_STAND_ALONE=true \
+    -v "$root/$plane/config.yaml:/usr/local/apisix/conf/config.yaml:ro" \
+    -v "$plane_routes:/usr/local/apisix/conf/apisix.yaml:ro" \
+    --entrypoint /bin/sh "$apisix_image" -ec \
+    'apisix init >/dev/null; sed -n "s/^[[:space:]]*listen[[:space:]]\{1,\}\([^ ;]*\).*/\1/p" /usr/local/apisix/conf/nginx.conf | sort -u')
+  while IFS= read -r listener; do
+    case $listener in
+      unix:*|127.0.0.1:*|172.30.*:9080) ;;
+      *) echo "$plane renders a non-explicit or TLS listener: $listener" >&2; exit 1 ;;
+    esac
+  done <<<"$listeners"
+done
 
 if command -v shellcheck >/dev/null; then shellcheck scripts/*.sh egress-proxy/*.sh; fi
 echo "runtime=$AI_GATEWAY_RUNTIME compose=valid firewall=valid one_way_edges=valid private_paths=untracked"
