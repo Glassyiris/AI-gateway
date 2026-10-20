@@ -291,9 +291,17 @@ if not services or not networks:
 ALLOWED_VOLUMES = {"response-keeper-cache"}
 if "default" in networks or set(compose.get("volumes") or {}) - ALLOWED_VOLUMES:
     raise SystemExit("default network and named persistent volumes are forbidden")
-for service, config in services.items():
+def volume_mounts(config):
+    """(source, target) pairs; docker compose JSON uses long form, YAML may keep short form."""
     for volume in config.get("volumes", []):
-        source = volume.get("source") if isinstance(volume, dict) else str(volume).split(":")[0]
+        if isinstance(volume, dict):
+            yield str(volume.get("source", "")), str(volume.get("target", ""))
+        else:
+            parts = str(volume).split(":")
+            yield parts[0], parts[1] if len(parts) > 1 else ""
+
+for service, config in services.items():
+    for source, _ in volume_mounts(config):
         if source in ALLOWED_VOLUMES and service != "response-keeper":
             raise SystemExit(f"{service} must not mount the keeper cache volume")
 
@@ -434,7 +442,7 @@ if any(keeper_env.get(k) != v for k, v in keeper_routed.items()) or "UPSTREAM_UR
         or keeper_env.get("CPA_API_KEY") != (services.get("apisix-models", {}).get("environment") or {}).get("CPA_API_KEY") \
         or str(keeper_env.get("REQUIRE_NO_DEFAULT_ROUTE")) != "true":
     raise SystemExit("response-keeper must listen on loopback in routed mode with direct CPA/AISIX upstreams")
-if "response-keeper-cache:/var/tmp/response-keeper" not in [str(v) for v in keeper.get("volumes", [])]:
+if ("response-keeper-cache", "/var/tmp/response-keeper") not in set(volume_mounts(keeper)):
     raise SystemExit("response-keeper must keep its disposable cache on the response-keeper-cache volume")
 if str(keeper.get("user")) != "65534:65534" or keeper.get("read_only") is not True or {str(cap).upper() for cap in keeper.get("cap_drop", [])} != {"ALL"} or keeper.get("cap_add"):
     raise SystemExit("response-keeper must be non-root/read-only and drop all capabilities")
