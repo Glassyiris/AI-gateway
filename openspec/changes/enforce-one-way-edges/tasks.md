@@ -11,9 +11,9 @@
 
 ## 2. Production (separately approved window)
 
-Operator decision (2026-10-20): include the 9083 binding fix in the whole-stack rollout; do not deploy the diagnostics host namespace/relay separately. All repository checkmarks above mean implemented/tested, not live.
+Operator decision (2026-10-20): deploy AISIX and 9083 together, verify, then push the deployment record; leave other agents' code untouched. Activation completed at 03:52 UTC; bounded verification completed at 04:09 UTC. See [deployment evidence and remaining limits](../../../docs/one-way-edges-deployment-2026-10-20.md).
 
-- [ ] 2.1 Snapshot compose, override, `.env`, `aisix/config.yaml`, both APISIX configs and the catalog template into `.rollback/one-way-edges-<ts>/`, and record the container ID map
-- [ ] 2.2 Upload files, then run one coupled `up -d --force-recreate --remove-orphans` (including the provider-sidecar trio); remove the four obsolete networks afterwards
-- [ ] 2.3 Verify: all services healthy, 0 OOM; the all-pairs reachability script shows only forward relay edges plus the documented residual; Responses go through keeper; one Sub2API→AISIX request succeeds; status page and metrics badge work; host 9083 listens only on loopback and the chosen Tailscale IP, never wildcard
-- [ ] 2.4 Rollback on failure: restore the snapshot and run the coupled recreate again
+- [x] 2.1 Snapshot compose, override, `.env`, `aisix/config.yaml`, both APISIX configs and the catalog template into `.rollback/one-way-edges-20261020T034458Z/`, and record container/network/volume maps and old baselines
+- [x] 2.2 Upload files and recreate the coupled stack, including the provider-sidecar trio, without builds or volume deletion; remove the four obsolete networks before `up` because their subnets are reused
+- [x] 2.3 Verify: 53 running, all 12 configured healthchecks healthy, 0 restarts/OOM; 5,798 ordinary-namespace socket checks match; three TUN-source destination packet checks pass; 240 Responses log entries target keeper and none loop back; authenticated Sub2API→AISIX catalog request succeeds; status and metrics work; 9083 binds only loopback and the chosen Tailscale IP. Control-plane latency and long-term stability remain open, not certified by this gate
+- [x] 2.4 Prepare automatic failure recovery and a drift-guarded manual snapshot restore with coupled recreation; syntax-check the restore script. No failure required rollback, so its destructive branch was not exercised
