@@ -424,7 +424,7 @@ if "/opt/apisix/custom/routing_selector.lua" not in volume_targets(selector_serv
     raise SystemExit("catalog routing selector module must be mounted read-only into APISIX")
 
 # response-keeper is a loopback-only sidecar in the selector namespace; it owns
-# no network edge and only reaches the selector on 127.0.0.1:9080.
+# no network edge and reaches CPA/AISIX/routing index through that namespace.
 keeper = services.get("response-keeper", {})
 keeper_env = keeper.get("environment") or {}
 if keeper.get("network_mode") != "service:apisix-models-netns" or keeper.get("ports") or keeper.get("networks"):
