@@ -655,7 +655,7 @@ services:
   response-keeper:
     build:
       context: ./middleware/response-keeper
-    image: ${RESPONSE_KEEPER_IMAGE:-ghcr.io/xz-dev/response-keeper:2d269bc11ec8c1b58040a8f03f3cd5763f5c41c1@sha256:74b3213b791952994785502357024fc79ed138ee68a541978a853efc9c1708de}
+    image: ${RESPONSE_KEEPER_IMAGE:-ghcr.io/xz-dev/response-keeper:df45c7fdd4e4ceeead26ff7b1008251737d4e86a@sha256:badb1a6c74e75341842774293b82361c6ea6c1d9cf153cbc73fde007098f386c}
     pull_policy: build
     user: "65534:65534"
     network_mode: service:apisix-models-netns
@@ -682,7 +682,7 @@ services:
       STORE_DIR: /var/tmp/response-keeper
       GOMEMLIMIT: ${RESPONSE_KEEPER_GOMEMLIMIT:-256MiB}
       STORE_TTL: ${RESPONSE_KEEPER_STORE_TTL:-10m}
-      STORE_MAX_BYTES: ${RESPONSE_KEEPER_STORE_MAX_BYTES:-41943040}
+      STORE_MAX_BYTES: ${RESPONSE_KEEPER_STORE_MAX_BYTES:-209715200}
       REQUIRE_NO_DEFAULT_ROUTE: "true"
     healthcheck:
       test: [CMD, /response-keeper, healthcheck]
@@ -758,7 +758,7 @@ services:
   models-enricher:
     build:
       context: ./models-enricher
-    image: ${MODELS_ENRICHER_IMAGE:-ghcr.io/xz-dev/ai-gateway-models-enricher:claude-500k-20260929-e006756}
+    image: ${MODELS_ENRICHER_IMAGE:-ghcr.io/xz-dev/ai-gateway-models-enricher:devin-bare-20261020-0af8c0e}
     pull_policy: build
     network_mode: service:models-enricher-netns
     restart: unless-stopped
