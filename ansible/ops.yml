@@ -5,7 +5,8 @@
 #   ansible-playbook ops.yml --tags deploy-squid  [-e ai_ops_mode=plan]
 #   ansible-playbook ops.yml --tags deploy-aisix      [-e ai_ops_mode=plan]
 #   ansible-playbook ops.yml --tags deploy-model-sync  [-e ai_ops_mode=plan]
-#   ansible-playbook ops.yml --tags deploy-response-keeper [-e ai_ops_mode=plan]
+#   ansible-playbook ops.yml --tags deploy-response-keeper [-e ai_ops_mode=plan]  (legacy: also recreates sub2api)
+#   ansible-playbook ops.yml --tags deploy-responses-path [-e ai_ops_mode=plan]
 #   ansible-playbook ops.yml --tags restart-response-keeper [-e ai_ops_mode=plan]
 #   ansible-playbook ops.yml --tags rollback-model-sync
 #   ansible-playbook ops.yml --tags rollback           -e service=cli-proxy-api
@@ -874,6 +875,236 @@
           verified_image={{ ai_response_keeper_verified_image | default('') }}
       when: ai_ops_mode != "plan"
       tags: [deploy-response-keeper]
+
+    # ======================= deploy-responses-path =======================
+    # Single-traversal Responses topology: apisix routes /v1/responses and
+    # /rk/v1/responses straight to keeper; keeper routes to CPA/AISIX. Recreates
+    # ONLY response-keeper and apisix-models (never sub2api). Plan shows the four
+    # file diffs, digest and protected map. Apply: digest gate -> pull -> snapshot
+    # -> upload -> one scoped recreate -> verify -> restore snapshot on failure.
+    - name: Resolve desired keeper image (responses-path)
+      ansible.builtin.set_fact:
+        _rp_desired_image: "{{ lookup('ansible.builtin.file', ai_ops_config_dir + '/.env') | regex_search('(?m)^RESPONSE_KEEPER_IMAGE=(.+)$', '\\1') | first }}"
+      no_log: true  # reading .env; expose only the parsed field
+      tags: [deploy-responses-path]
+
+    - name: Define responses-path managed files
+      ansible.builtin.set_fact:
+        _rp_files:
+          - {label: compose.yaml, local: "{{ ai_ops_config_dir }}/compose.yaml", remote: "{{ ai_ops_deploy_root }}/compose.yaml"}
+          - {label: apisix-models/apisix.yaml, local: "{{ playbook_dir }}/../apisix-models/apisix.yaml", remote: "{{ ai_ops_deploy_root }}/apisix-models/apisix.yaml"}
+          - {label: apisix-models/config.yaml, local: "{{ playbook_dir }}/../apisix-models/config.yaml", remote: "{{ ai_ops_deploy_root }}/apisix-models/config.yaml"}
+          - {label: apisix-models/routing_selector.lua, local: "{{ playbook_dir }}/../apisix-models/routing_selector.lua", remote: "{{ ai_ops_deploy_root }}/apisix-models/routing_selector.lua"}
+        _rp_targets: [response-keeper, apisix-models]
+      tags: [deploy-responses-path]
+
+    - name: Read current target container IDs
+      ansible.builtin.command: "{{ _compose }} ps -q {{ item }}"
+      register: _rp_before
+      changed_when: false
+      failed_when: false
+      loop: "{{ _rp_targets }}"
+      tags: [deploy-responses-path]
+
+    - name: Read current keeper image identity
+      ansible.builtin.command:
+        argv: ["{{ _runtime }}", inspect, '--format={{ "{{.Image}}" }}', "{{ _rp_before.results[0].stdout | trim }}"]
+      register: _rp_before_image
+      changed_when: false
+      failed_when: false
+      when: _rp_before.results[0].stdout | trim != ""
+      tags: [deploy-responses-path]
+
+    - name: Capture every other running service as protected
+      ansible.builtin.shell: |
+        set -o pipefail
+        {{ _compose }} ps --services --status running | grep -vxE 'response-keeper|apisix-models' || true
+      args:
+        executable: /bin/bash
+      register: _rp_other_services
+      changed_when: false
+      tags: [deploy-responses-path]
+
+    - name: Read protected container IDs
+      ansible.builtin.command: "{{ _compose }} ps -q {{ item }}"
+      register: _rp_protected
+      changed_when: false
+      loop: "{{ _rp_other_services.stdout_lines }}"
+      tags: [deploy-responses-path]
+
+    - name: Build responses-path maps
+      ansible.builtin.set_fact:
+        _rp_old_containers: "{{ dict(_rp_before.results | map(attribute='item') | zip(_rp_before.results | map(attribute='stdout') | map('trim'))) }}"
+        _rp_protected_map: "{{ dict(_rp_protected.results | map(attribute='item') | zip(_rp_protected.results | map(attribute='stdout') | map('trim'))) }}"
+      tags: [deploy-responses-path]
+
+    - name: Show responses-path file diffs (drift-gated)
+      ansible.builtin.include_role:
+        name: ai_ops
+        tasks_from: prepare-file
+        apply:
+          tags: [deploy-responses-path]
+      vars:
+        ai_file_label: "{{ item.label }}"
+        ai_file_local: "{{ item.local }}"
+        ai_file_remote: "{{ item.remote }}"
+      loop: "{{ _rp_files }}"
+      loop_control:
+        label: "{{ item.label }}"
+      tags: [deploy-responses-path]
+
+    - name: Show responses-path plan
+      ansible.builtin.debug:
+        msg:
+          desired_keeper_image: "{{ _rp_desired_image }}"
+          current_keeper_image: "{{ _rp_before_image.stdout | default('') | trim }}"
+          recreation: "{{ _rp_targets }}"
+          current: "{{ _rp_old_containers }}"
+          protected_count: "{{ _rp_protected_map | length }}"
+          protected: "{{ _rp_protected_map }}"
+      tags: [deploy-responses-path]
+
+    - name: Require approved keeper digest for apply
+      ansible.builtin.assert:
+        that:
+          - ai_ops_response_keeper_approved_digest | length > 0
+          - ai_ops_response_keeper_approved_digest == _rp_desired_image.split('@')[-1]
+        fail_msg: >-
+          response-keeper digest is not approved or became stale. Run plan mode, then apply with
+          -e ai_ops_response_keeper_approved_digest={{ _rp_desired_image.split('@')[-1] }}
+      when: ai_ops_mode != "plan"
+      tags: [deploy-responses-path]
+
+    - name: Pull the approved keeper digest before any mutation
+      ansible.builtin.command: "{{ _runtime }} pull {{ _rp_desired_image }}"
+      when: ai_ops_mode != "plan"
+      tags: [deploy-responses-path]
+
+    - name: Resolve pulled keeper image ID
+      ansible.builtin.command:
+        argv: ["{{ _runtime }}", image, inspect, '--format={{ "{{.Id}}" }}', "{{ _rp_desired_image }}"]
+      register: _rp_pulled_id
+      changed_when: false
+      when: ai_ops_mode != "plan"
+      tags: [deploy-responses-path]
+
+    - name: Snapshot rollback set (four files, .env selector, image and container IDs)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        dir={{ ai_ops_deploy_root }}/.rollback/responses-path-$(date -u +%Y%m%dT%H%M%SZ)
+        mkdir -p "$dir/apisix-models"
+        cp -p compose.yaml "$dir/compose.yaml"
+        cp -p apisix-models/apisix.yaml apisix-models/config.yaml apisix-models/routing_selector.lua "$dir/apisix-models/"
+        grep -E '^RESPONSE_KEEPER_IMAGE=' .env > "$dir/keeper-image.env"
+        chmod -R go-rwx "$dir"
+        echo "$dir"
+      args:
+        chdir: "{{ ai_ops_deploy_root }}"
+        executable: /bin/bash
+      register: _rp_snapshot
+      when: ai_ops_mode != "plan"
+      tags: [deploy-responses-path]
+
+    - name: Record pre-deploy identities in snapshot
+      ansible.builtin.copy:
+        dest: "{{ _rp_snapshot.stdout | trim }}/identities.yml"
+        mode: "0600"
+        content: |
+          {{ {'keeper_image_id': _rp_before_image.stdout | default('') | trim,
+              'targets': _rp_old_containers,
+              'protected': _rp_protected_map} | to_nice_yaml }}
+      when: ai_ops_mode != "plan"
+      tags: [deploy-responses-path]
+
+    - name: Apply responses-path
+      block:
+        - name: Upload .env (no activation)
+          ansible.builtin.copy:
+            src: "{{ ai_ops_config_dir }}/.env"
+            dest: "{{ ai_ops_deploy_root }}/.env"
+            mode: preserve
+          no_log: true
+        - name: Upload managed files
+          ansible.builtin.copy:
+            src: "{{ item.local }}"
+            dest: "{{ item.remote }}"
+            mode: preserve
+          loop: "{{ _rp_files }}"
+          loop_control:
+            label: "{{ item.label }}"
+        - name: Recreate only response-keeper and apisix-models
+          ansible.builtin.command: >-
+            {{ _compose }} up -d --force-recreate --no-deps --no-build --pull never
+            response-keeper apisix-models
+        - name: Verify responses-path
+          ansible.builtin.include_role:
+            name: ai_ops
+            tasks_from: verify-responses-path
+          vars:
+            _ai_verify_expected_image_identity: "{{ _rp_pulled_id.stdout | trim }}"
+            _ai_verify_expected_revision: "{{ ai_ops_response_keeper_expected_revision }}"
+            ai_verify_old_containers: "{{ _rp_old_containers }}"
+            ai_protected_containers: "{{ _rp_protected_map }}"
+      rescue:
+        - name: Restore snapshot files
+          ansible.builtin.shell: |
+            set -euo pipefail
+            dir={{ _rp_snapshot.stdout | trim | quote }}
+            cp -p "$dir/compose.yaml" compose.yaml
+            cp -p "$dir/apisix-models/"* apisix-models/
+            sed -i "s|^RESPONSE_KEEPER_IMAGE=.*|$(cat "$dir/keeper-image.env")|" .env
+          args:
+            chdir: "{{ ai_ops_deploy_root }}"
+            executable: /bin/bash
+          no_log: true
+        - name: Recreate restored response-keeper and apisix-models
+          ansible.builtin.command: >-
+            {{ _compose }} up -d --force-recreate --no-deps --no-build --pull never
+            response-keeper apisix-models
+          register: _rp_recovery
+          failed_when: false
+        - name: Record failed responses-path receipt
+          ansible.builtin.copy:
+            dest: "{{ ai_ops_deploy_root }}/.ai-ops-state/receipt-responses-path-failed-{{ lookup('ansible.builtin.pipe', 'date +%s') }}.txt"
+            mode: "0600"
+            content: |
+              operation=responses-path-deploy outcome=candidate-failed-restored
+              desired_image={{ _rp_desired_image }}
+              snapshot={{ _rp_snapshot.stdout | trim }}
+              recovery_rc={{ _rp_recovery.rc | default('n/a') }}
+        - name: Fail after restore
+          ansible.builtin.fail:
+            msg: >-
+              responses-path activation/verification failed; snapshot {{ _rp_snapshot.stdout | trim }}
+              restored and services recreated (rc={{ _rp_recovery.rc | default('n/a') }}). Investigate before retrying.
+      when: ai_ops_mode != "plan"
+      tags: [deploy-responses-path]
+
+    - name: Record new baselines for responses-path files
+      ansible.builtin.copy:
+        src: "{{ item.local }}"
+        dest: "{{ ai_ops_deploy_root }}/.ai-ops-state/{{ item.label | replace('/', '__') }}.baseline"
+        mode: "0600"
+      loop: "{{ _rp_files }}"
+      loop_control:
+        label: "{{ item.label }}"
+      when: ai_ops_mode != "plan"
+      tags: [deploy-responses-path]
+
+    - name: Write sanitized responses-path receipt
+      ansible.builtin.copy:
+        dest: "{{ ai_ops_deploy_root }}/.ai-ops-state/receipt-responses-path-{{ lookup('ansible.builtin.pipe', 'date +%s') }}.txt"
+        mode: "0600"
+        content: |
+          operation=responses-path-deploy mode={{ ai_ops_mode }}
+          desired_image={{ _rp_desired_image }}
+          snapshot={{ _rp_snapshot.stdout | trim }}
+          previous={{ _rp_old_containers }}
+          verified={{ ai_responses_path_verified | default({}) }}
+          verified_keeper={{ ai_response_keeper_verified_image | default('') }}
+          protected_count={{ _rp_protected_map | length }}
+      when: ai_ops_mode != "plan"
+      tags: [deploy-responses-path]
 
     # ======================= restart-response-keeper =======================
     # Restart only the keeper container: clears its in-memory response state

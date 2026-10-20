@@ -57,6 +57,18 @@ ansible-playbook ops.yml --tags deploy-models-enricher-config
 # Guarded models-enricher rollback restores the protected YAML and proves readiness.
 ansible-playbook ops.yml --tags rollback-models-enricher-config
 
+# Responses path: recreate ONLY response-keeper and apisix-models (never sub2api).
+# Plan prints four file diffs, the keeper digest and the protected container map;
+# apply needs the reviewed index digest and source revision, snapshots to
+# .rollback/responses-path-<UTC>/, verifies, and restores the snapshot on failure.
+ansible-playbook ops.yml --tags deploy-responses-path -e ai_ops_mode=plan
+ansible-playbook ops.yml --tags deploy-responses-path \
+  -e ai_ops_response_keeper_approved_digest=sha256:<index digest> \
+  -e ai_ops_response_keeper_expected_revision=<keeper commit>
+
+# Restart only keeper (clears its disposable history cache).
+ansible-playbook ops.yml --tags restart-response-keeper -e ai_ops_mode=plan
+
 # rollback last deploy of a component's file set
 ansible-playbook ops.yml --tags rollback -e service=cli-proxy-api
 
@@ -86,10 +98,13 @@ defaults. Key ones:
 | `ai_ops_model_sync_log_tail` | `200` | maximum current-container log lines parsed for the round summary |
 | `ai_ops_models_enricher_verify_retries` / `ai_ops_models_enricher_verify_delay_seconds` | `30` / `2` | bounded wait for the recreated models-enricher readiness |
 | `ai_ops_adopted_direct_models` / `ai_ops_standalone_retained` | `[]` | AISIX orphan-report approval/exclusion lists |
+| `ai_ops_response_keeper_approved_digest` | `""` | keeper image index digest from the reviewed `deploy-responses-path` plan; required for apply |
+| `ai_ops_response_keeper_expected_revision` | `""` | keeper OCI revision label (source commit) checked after recreate |
+| `ai_ops_response_keeper_verify_retries` / `ai_ops_response_keeper_verify_delay_seconds` | `30` / `2` | bounded wait for keeper health and the route probes |
 
 ## Drift gate
 
-Component deploys (`--tags deploy`, `deploy-aisix`, `deploy-model-sync`) checksum each managed remote
+Component deploys (`--tags deploy`, `deploy-aisix`, `deploy-model-sync`, `deploy-responses-path`) checksum each managed remote
 file against the recorded baseline (`.ai-ops-state/<file>.baseline`); a mismatch
 stops the deploy before any upload. Squid policy deploys (`--tags deploy-squid`)
 upload one tarball + a `sha256sum` manifest over all generated files; the drift
