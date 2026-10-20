@@ -6,6 +6,19 @@ import tempfile
 from pathlib import Path
 
 REQUIRED_FALLBACK_STATUSES = [400, 401, 402, 403, 404]
+# Every routing group shares one retry contract; only strategy/hash_on/targets differ.
+REQUIRED_ROUTING = {"retries": 0, "retry_on_429": True}
+# Every direct model shares one cooldown. trigger_statuses replaces AISIX defaults,
+# so it keeps them and adds CPA's target-local 400/402/403/404.
+REQUIRED_COOLDOWN = {
+    "enabled": True,
+    "default_seconds": 60,
+    "max_seconds": 300,
+    "honor_retry_after": True,
+    "trigger_statuses": [400, 401, 402, 403, 404, 408, 429, 500, 502, 503, 504],
+}
+# Per-model overrides would bypass the group contract (target retries win over routing.retries).
+FORBIDDEN_DIRECT_KEYS = ("retries", "timeout", "stream_timeout")
 
 
 class PolicyError(Exception):
@@ -23,12 +36,17 @@ def validate(resources):
         if not isinstance(model, dict):
             raise PolicyError("every AISIX model must be an object")
         routing = model.get("routing")
-        if routing is None:
-            continue
-        routes += 1
         name = model.get("display_name")
         if not isinstance(name, str) or not name:
             name = "<unknown>"
+        if routing is None:
+            if model.get("cooldown") != REQUIRED_COOLDOWN:
+                raise PolicyError(f"direct model {name} must use the shared cooldown policy")
+            for key in FORBIDDEN_DIRECT_KEYS:
+                if key in model:
+                    raise PolicyError(f"direct model {name} must not override {key}")
+            continue
+        routes += 1
         if not isinstance(routing, dict):
             raise PolicyError(f"routing model {name} must contain a routing object")
         statuses = routing.get("fallback_on_statuses")
@@ -42,6 +60,9 @@ def validate(resources):
                 f"routing model {name} must declare fallback_on_statuses: "
                 "[400, 401, 402, 403, 404]"
             )
+        for key, value in REQUIRED_ROUTING.items():
+            if routing.get(key) != value or type(routing.get(key)) is not type(value):
+                raise PolicyError(f"routing model {name} must declare {key}: {json.dumps(value)}")
     if routes == 0:
         raise PolicyError("AISIX resources must contain at least one routing model")
     return routes
@@ -92,12 +113,46 @@ def self_test():
         "models": [
             {
                 "display_name": "route",
-                "routing": {"fallback_on_statuses": REQUIRED_FALLBACK_STATUSES.copy()},
-            }
+                "routing": {
+                    "fallback_on_statuses": REQUIRED_FALLBACK_STATUSES.copy(),
+                    **REQUIRED_ROUTING,
+                },
+            },
+            {"display_name": "direct", "cooldown": json.loads(json.dumps(REQUIRED_COOLDOWN))},
         ]
     }
     if validate(valid) != 1:
         raise PolicyError("valid policy self-test failed")
+    for index, key, value in (
+        (0, "retries", 1),
+        (0, "retries", None),
+        (0, "retry_on_429", False),
+        (0, "retry_on_429", None),
+        (1, "cooldown", None),
+        (1, "retries", 10),
+        (1, "timeout", 15000),
+    ):
+        candidate = json.loads(json.dumps(valid))
+        target = candidate["models"][index]
+        target = target["routing"] if index == 0 else target
+        if value is None:
+            target.pop(key)
+        else:
+            target[key] = value
+        try:
+            validate(candidate)
+        except PolicyError:
+            pass
+        else:
+            raise PolicyError(f"invalid policy self-test was accepted: {key}={value}")
+    candidate = json.loads(json.dumps(valid))
+    candidate["models"][1]["cooldown"]["trigger_statuses"] = [429]
+    try:
+        validate(candidate)
+    except PolicyError:
+        pass
+    else:
+        raise PolicyError("invalid policy self-test was accepted: narrowed trigger_statuses")
     for statuses in (
         None,
         [418],
@@ -127,6 +182,8 @@ def self_test():
     block_yaml = """models:
   - display_name: route
     routing:
+      retries: 0
+      retry_on_429: true
       fallback_on_statuses:
         - 400
         - 401
