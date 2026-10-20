@@ -9,6 +9,18 @@ local source = (arg[0]:match("^(.*)/") or ".") .. "/routing_selector.lua"
 local real_ngx = ngx
 local total = 0
 
+-- Shared dict that persists across run() calls in one test, like the real
+-- ngx.shared zone across requests in one worker.
+local function new_shared_dict()
+    local store = {}
+    return {
+        get = function(_, key) return store[key] end,
+        set = function(_, key, value, _) store[key] = value return true end,
+        delete = function(_, key) store[key] = nil return true end,
+        _store = store,
+    }
+end
+
 local function run(options)
     options = options or {}
     local calls = {}
@@ -16,6 +28,7 @@ local function run(options)
     local body = options.body or '{"model":"axis/model + exact","stream":true}'
     local rewritten
     local response_body = options.lookup_body or ('{"decision":"' .. (options.decision or "cpa") .. '","generation":7}')
+    local log_lines = {}
     local fake = {
         req = {
             read_body = function() end,
@@ -27,6 +40,9 @@ local function run(options)
         escape_uri = function(value)
             return (value:gsub("%%", "%%25"):gsub("/", "%%2F"):gsub(" ", "%%20"):gsub("%+", "%%2B"))
         end,
+        log = function(_, ...) log_lines[#log_lines + 1] = table.concat({...}) end,
+        WARN = 5,
+        shared = options.shared and {routing_lkg = options.shared} or nil,
     }
     package.loaded["resty.http"] = {
         new = function()
@@ -61,7 +77,7 @@ local function run(options)
     local ok, status, result, response_headers = pcall(module.run, nil, ctx, "cpa-secret")
     _G.ngx = real_ngx
     assert(ok, status)
-    return status, result, response_headers, ctx, calls, headers, rewritten
+    return status, result, response_headers, ctx, calls, headers, rewritten, log_lines
 end
 
 local function test(name, fn)
@@ -130,6 +146,60 @@ test("existing prompt cache compatibility rewrite remains scoped", function()
     assert(not rewritten:find("prompt_cache_retention", 1, true))
     local document = json.decode(rewritten)
     assert(document and document.model == "cpa/model", rewritten)
+end)
+
+test("authoritative decision stores last-known-good in shared dict", function()
+    local shared = new_shared_dict()
+    local status, _, _, ctx = run({decision = "aisix", shared = shared})
+    assert(status == nil and ctx.upstream_id == "aisix")
+    assert(shared._store["axis/model + exact"] == "aisix")
+end)
+
+test("transport failure uses fresh stored decision and warns once", function()
+    local shared = new_shared_dict()
+    run({decision = "cpa", shared = shared})
+    for _, options in ipairs({{connect_error = true}, {request_error = true}, {lookup_status = 500}, {lookup_body = "not-json"}}) do
+        options.shared = shared
+        local status, _, _, ctx, calls, _, _, log_lines = run(options)
+        assert(status == nil and ctx.upstream_id == "cpa")
+        assert(#calls <= 1) -- one bounded lookup attempt; connect errors never reach request()
+        assert(#log_lines == 1 and log_lines[1]:find("last%-known%-good"))
+        assert(log_lines[1]:find("axis/model") and not log_lines[1]:find("cpa%-secret"))
+    end
+end)
+
+test("transport failure without a stored decision stays 503", function()
+    local shared = new_shared_dict()
+    local status, body, _, ctx = run({connect_error = true, shared = shared})
+    assert(status == 503 and body:find('"code":"service_unavailable"', 1, true) and ctx.upstream_id == nil)
+    -- same, but entirely without a shared dict configured
+    status, body, _, ctx = run({connect_error = true})
+    assert(status == 503 and ctx.upstream_id == nil)
+end)
+
+test("not_found and unavailable delete the stored decision", function()
+    local shared = new_shared_dict()
+    run({decision = "cpa", shared = shared})
+    assert(shared._store["axis/model + exact"] == "cpa")
+    local status, _, _, ctx = run({decision = "not_found", shared = shared})
+    assert(status == 404 and ctx.upstream_id == nil)
+    assert(shared._store["axis/model + exact"] == nil)
+    -- stored entry must never be resurrected: transport failure now 503s
+    local fail_status, _, _, fail_ctx = run({connect_error = true, shared = shared})
+    assert(fail_status == 503 and fail_ctx.upstream_id == nil)
+    -- unavailable also deletes
+    run({decision = "aisix", shared = shared})
+    local un_status, _, _, un_ctx = run({decision = "unavailable", shared = shared})
+    assert(un_status == 503 and un_ctx.upstream_id == nil and shared._store["axis/model + exact"] == nil)
+    local fail2_status = run({connect_error = true, shared = shared})
+    assert(fail2_status == 503)
+end)
+
+test("stored decision is keyed by exact model ID", function()
+    local shared = new_shared_dict()
+    run({decision = "cpa", shared = shared, body = '{"model":"model-a"}'})
+    local status, _, _, ctx = run({connect_error = true, shared = shared, body = '{"model":"model-b"}'})
+    assert(status == 503 and ctx.upstream_id == nil)
 end)
 
 print("PASS all " .. total .. " routing selector checks")

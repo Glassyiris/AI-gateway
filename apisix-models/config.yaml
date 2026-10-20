@@ -13,6 +13,8 @@ nginx_config:
   error_log_level: warn
   http:
     client_max_body_size: 16m
+    custom_lua_shared_dict:
+      routing_lkg: 1m
 deployment:
   role: data_plane
   role_data_plane:

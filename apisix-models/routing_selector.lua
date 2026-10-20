@@ -26,6 +26,7 @@ local KEEPALIVE_POOL_SIZE = 100
 local MAX_REQUEST_BYTES = 16 * 1024 * 1024
 local MAX_INDEX_BYTES = 1024
 local MAX_MODEL_BYTES = 1024
+local LKG_TTL_S = 900 -- last-known-good routing decision, failure fallback only
 
 local JSON_HEADERS = { ["Content-Type"] = "application/json" }
 local INVALID_BODY = '{"error":{"code":"invalid_request_error","message":"A valid top-level model is required.","type":"invalid_request_error"}}'
@@ -98,6 +99,30 @@ local function read_index_body(httpc, response)
     return table_concat(chunks)
 end
 
+local lkg
+if ngx and ngx.shared then
+    lkg = ngx.shared.routing_lkg
+end
+
+local function lkg_get(model)
+    if not lkg then
+        return nil
+    end
+    return lkg:get(model)
+end
+
+local function lkg_set(model, decision)
+    if lkg and (decision == "cpa" or decision == "aisix") then
+        lkg:set(model, decision, LKG_TTL_S)
+    end
+end
+
+local function lkg_delete(model)
+    if lkg then
+        lkg:delete(model)
+    end
+end
+
 local function lookup(model)
     local httpc = http.new()
     httpc:set_timeouts(CONNECT_TIMEOUT_MS, SEND_TIMEOUT_MS, READ_TIMEOUT_MS)
@@ -158,6 +183,18 @@ function _M.run(_, ctx, cpa_api_key)
     end
 
     local decision = lookup(document.model)
+    if decision == "not_found" or decision == "unavailable" then
+        lkg_delete(document.model)
+    elseif decision == "cpa" or decision == "aisix" then
+        lkg_set(document.model, decision)
+    else
+        local stored = lkg_get(document.model)
+        if stored then
+            ngx.log(ngx.WARN, "routing-index lookup failed; using last-known-good decision ",
+                stored, " for model ", document.model)
+            decision = stored
+        end
+    end
     if decision == "not_found" then
         return 404, MODEL_NOT_FOUND, JSON_HEADERS
     end
