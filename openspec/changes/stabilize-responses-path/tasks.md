@@ -1,0 +1,79 @@
+## 0. Preconditions
+
+- [ ] 0.1 Confirm the keeper streaming-memory core (PLAN/keeper-oom.md) is accepted and deployed, and record its keeper commit and image digest as this change's base. Verify that `docker inspect` of production keeper shows that digest and that the named cache volume is mounted.
+- [x] 0.2 Record the production baseline: 24 h counts of 127-byte selector 503s, keeper `ws previous=false/true`, apisix requests with upstream `127.0.0.1:9080`, and container IDs of all services. Verify the numbers are saved in `verification.md`.
+
+## 1. A — Last-known-good fallback in the apisix selector
+
+- [x] 1.1 Add a bounded shared dict (`routing_lkg`, 1 MiB) to `apisix-models/config.yaml`. Verify that `apisix test` or a container start succeeds and `ngx.shared.routing_lkg` is non-nil.
+- [x] 1.2 Update `routing_selector.lua`:
+  - store `cpa`/`aisix` decisions with a 15 min TTL;
+  - delete the entry on `not_found`/`unavailable`;
+  - on transport failure, use the stored decision, or return 503 when none exists;
+  - log one warning per fallback use, with model and age only.
+
+  Verify that `routing_selector_test.lua` covers: fresh fallback, expired fallback, no entry, `not_found` and `unavailable` override, and malformed body treated as a transport failure.
+- [x] 1.3 Run the Lua tests in the apisix image. Verify all pass and that the existing four-outcome tests are unchanged.
+
+## 2. B — Keeper classifies and forwards directly
+
+- [x] 2.1 Add the routing client to keeper (`ROUTING_INDEX_URL`, 300 ms/300 ms/1 s budget, four-outcome and generation validation identical to Lua). Verify with Go unit tests against the shared fixture of index bodies, including malformed bodies, non-200 responses, timeouts, and generation 0.
+- [x] 2.2 Add the last-known-good store to keeper (4096 entries, 15 min, same rules as 1.2). Verify with unit tests that mirror 1.2 and with a race test under concurrent lookups.
+- [x] 2.3 Add the upstream map (`UPSTREAM_CPA_URL`, `UPSTREAM_AISIX_URL`, `CPA_API_KEY`) while keeping single-`UPSTREAM_URL` mode. Verify that config validation rejects partial configuration, and that existing tests pass in single mode.
+- [x] 2.4 Classify the top-level `model` during request preparation (HTTP and each WebSocket turn), before any upstream request or history access. Map `not_found` to 404 and `unavailable`/no-fallback to 503, in protocol shape: JSON error, SSE error event, and WebSocket error frame with the socket left open. Verify with tests for each transport, including two WebSocket turns that route to different backends.
+- [x] 2.5 Credentials: use the CPA key for CPA and the original `Authorization` for AISIX. The owner is always derived from the original `Authorization`, and credentials never appear in logs. Verify with a test where two callers on CPA cannot continue each other's IDs, a test that AISIX receives the caller header, and a log grep for sentinel keys.
+- [x] 2.6 Strip top-level `prompt_cache_retention` from HTTP bodies and WebSocket frames in the streaming writer. Verify the upstream body lacks the field and otherwise equals the accepted bridge writer output, with other top-level values keeping their original encoding (golden test). Operator decision 2026-10-19: keep existing bridge semantics rather than literal original-wire bytes.
+- [x] 2.7 Run `go test -race ./...`, `go vet`, and the existing memory-only capacity workload once, unchanged. Verify there is no regression from the keeper-oom acceptance numbers.
+
+Implementation evidence for 2.1–2.5/2.7 is the isolated candidate `/var/tmp/keeper-route-b/source`, not canonical or deployed keeper. Review and routed capacity receipts are recorded in `verification.md`. Task 2.6 is accepted against the operator-selected bridge-writer contract; reviewer evidence is in `verification.md`.
+
+## 3. B — apisix and compose wiring
+
+- [x] 3.1 Update `apisix-models/apisix.yaml`:
+  - `/v1/responses` and `/rk/v1/responses` (GET+POST, websocket) → `response-keeper`, with no body plugins;
+  - remove `/v1/responses` from `catalog-routing-selector`;
+  - keep `/rk/*` passthrough for other paths;
+  - set the Responses route body limit to 32 MiB.
+
+  Verify with a config render plus a local apisix: no Responses request reaches `self`, and a 20 MiB body reaches the fake keeper.
+- [x] 3.2 Update the keeper service in `compose.yaml` (public example) and `ansible/private-config/compose.yaml`:
+  - routing and upstream environment, `CPA_API_KEY`;
+  - named volume `response-keeper-cache:/var/tmp/response-keeper`, `STORE_DIR`, `GOMEMLIMIT`;
+  - keep `read_only`, `pids_limit: 64` and `mem_limit`;
+  - update the stale "loops back to 9080" comments.
+
+  Verify that `docker compose config` shows only keeper and apisix-models changed (diff against the baseline render).
+- [x] 3.3 Local integration with the compose subset (apisix-models, keeper, fake CPA, fake AISIX, fake enricher). Verify:
+  - single traversal per turn, from access logs;
+  - continuation across HTTP and WebSocket;
+  - owner isolation;
+  - enricher paused → fallback used, then 503 after expiry or cold start;
+  - `not_found` gives 404 on HTTP and a WebSocket error frame;
+  - 16–32 MiB bodies are accepted.
+
+## 4. D — Pi extension cross-socket continuation
+
+- [x] 4.1 Add a per-identity anchor map, written when a turn completes with store acknowledged, and use it to seed new connections in `acquire()`. Clear it on cooldown, on a recovery probe, and on rejection. Verify with a test where an idle close and reconnect makes the first frame carry `previous_response_id` plus delta, and the notification reports `WS/continuation`.
+- [x] 4.2 Treat `previous_response_not_found` on a bridge-owned anchor as the one-shot full-history repair signal. Verify that exactly one retry follows, that it does not repeat for 5xx errors, partial output or auth errors, and that a different credential never reuses an anchor.
+- [x] 4.3 Run the extension test suite (`bun test` / existing harness). Verify all pass, including the durable-provider and checkpoint tests.
+
+## 5. Review
+
+- [ ] 5.1 Independent review of the keeper routing, credential and owner changes, the apisix routes and the Lua fallback against the specs. Verify there are no P1/P2 findings open, and that minor findings are recorded as follow-ups.
+- [ ] 5.2 Independent review of the extension change. Verify the same criteria.
+
+## 6. Deployment (existing-scope approval verified; validation and rollback gates remain)
+
+- [x] 6.1 Add the scoped Ansible dispatch `deploy-responses-path`:
+  - plan → approved-digest gate → pull before mutation → snapshot of the previous keeper image, apisix.yaml, routing_selector.lua, config.yaml and compose block → `up -d --no-deps response-keeper apisix-models` → verify → rescue.
+
+  Verify that `--list-tags` shows it, that plan mode mutates nothing, and that the legacy `deploy-response-keeper` tag is not used.
+- [x] 6.2 Run plan mode against production. Present the diff and rollback receipt to the operator.
+- [x] 6.3 Apply after approval. Verify:
+  - both services are healthy;
+  - keeper restart and OOM counts are recorded;
+  - no `/v1/responses` request has upstream `127.0.0.1:9080`;
+  - other container IDs are unchanged;
+  - one real low-cost Responses turn on HTTP and one on WebSocket succeeds (only with operator approval for inference).
+- [ ] 6.4 Observe for 24 h and record selector and keeper 503 counts, the keeper `previous=false` ratio, and host swap and load in `verification.md`. Verify the comparison against the 0.2 baseline.
+- [ ] 6.5 Release the extension change and record its commit. Verify the `WS/full` share drops in keeper logs, measured as `ws previous=false` relative to total WebSocket turns.
