@@ -94,6 +94,40 @@ func TestCatalogIdentityOAuthRequiresPositiveMatch(t *testing.T) {
 	}
 }
 
+// 无路由前缀的 OAuth（如 devin）原名自带厂商命名空间：裸模型接管必须按身份而非斜杠判定。
+func TestCatalogIdentityNamespacedOAuthOriginalIsBare(t *testing.T) {
+	cfg := testCfg()
+	cfg.Channels = nil
+	cfg.BareModelsTakeover = true
+	fake := &fakeCPA{native: []byte(`{"models":[{"slug":"devin/swe-2","context_window":1000},{"slug":"devin/unregistered"}]}`)}
+	extra := func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v0/management/auth-files":
+			w.Write([]byte(`{"files":[{"name":"devin.json","provider":"devin"}]}`))
+		case "/v0/management/auth-files/models":
+			w.Write([]byte(`{"models":[{"id":"devin/swe-2"}]}`))
+		case "/v0/management/model-definitions/devin":
+			w.Write([]byte(`{"models":[{"id":"devin/swe-2"},{"id":"devin/unregistered"}]}`))
+		case "/v0/management/oauth-model-alias":
+			w.Write([]byte(`{"oauth-model-alias":{}}`))
+		default:
+			t.Errorf("unexpected identity endpoint: %s", r.URL.Path)
+			w.WriteHeader(404)
+		}
+	}
+	h, _ := identityHandler(t, fake, extra, cfg, nil)
+	got := identityCatalog(t, h)
+	if len(got) != 1 || got["devin/swe-2"] == nil {
+		t.Fatalf("registered namespaced original must be kept, unregistered dropped: %#v", got)
+	}
+
+	cfg.BareModelsTakeover = false
+	h, _ = identityHandler(t, fake, extra, cfg, nil)
+	if got := identityCatalog(t, h); len(got) != 0 {
+		t.Fatalf("takeover off must keep dropping unprefixed originals: %#v", got)
+	}
+}
+
 func TestCatalogIdentityKeepsRepeatedNamespace(t *testing.T) {
 	cfg := testCfg()
 	cfg.Channels = map[string]ChannelConfig{"nvidia": {}}

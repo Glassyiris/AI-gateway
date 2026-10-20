@@ -13,13 +13,15 @@ import (
 // 身份证据只决定如何筛选当前公开成员，管理列表从不直接添加公开记录。
 type catalogIdentities struct {
 	qualified, unavailable, nativeOnly map[string]bool
-	incomplete                         bool
+	// bare：OAuth 注册ID本身即带厂商命名空间的原名/别名（无路由前缀，如 devin/swe-2）。
+	bare       map[string]bool
+	incomplete bool
 }
 
 func (c *CPAClient) catalogIdentities(ctx context.Context, channels []Channel, discoveryErr error) *catalogIdentities {
 	ids := &catalogIdentities{
 		qualified: map[string]bool{}, unavailable: map[string]bool{}, nativeOnly: map[string]bool{},
-		incomplete: discoveryErr != nil,
+		bare: map[string]bool{}, incomplete: discoveryErr != nil,
 	}
 	for _, ch := range channels {
 		for _, id := range ch.Models {
@@ -94,6 +96,9 @@ func (c *CPAClient) oauthIdentities(ctx context.Context, ids *catalogIdentities)
 		for _, model := range registered {
 			// 第一步去原名/裸别名，包含原始ID中的厂商命名空间。
 			if originals[model.ID] || aliasIDs[model.ID] {
+				if strings.Contains(model.ID, "/") {
+					ids.bare[model.ID] = true
+				}
 				continue
 			}
 			// 第二步：注册ID去路由前缀后必须命中本provider的原名或别名。
@@ -128,7 +133,7 @@ func (ids *catalogIdentities) filter(base *Manifest, cfg *Config) (*Manifest, in
 	fallbackCount := 0
 	for _, model := range base.Models {
 		id := asString(model["slug"])
-		if cfg.BareModelsTakeover && !strings.Contains(id, "/") && !ids.qualified[id] {
+		if cfg.BareModelsTakeover && (!strings.Contains(id, "/") || ids.bare[id]) && !ids.qualified[id] {
 			// 裸模型接管：主人手设的裸名不再被入口过滤，进入动态补全。static 声明的裸名同样
 			// 保留在 base 中；merge 的 statics 循环会用 bySlug 里的动态数据克隆后叠加 override。
 			// 无源命中时保留 CPA 原始字段（fail-open，与 unavailable 同语义）。
