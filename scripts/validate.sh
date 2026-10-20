@@ -278,6 +278,7 @@ else
 fi
 
 python3 - "$rendered" "$rendered_format" <<'PY'
+import ipaddress
 import json
 import re
 import sys
@@ -393,6 +394,40 @@ for service, config in services.items():
     image_tag = image_name.rsplit(":", 1)[1]
     if image_tag.lower() == "latest" or not any(char.isdigit() for char in image_tag):
         raise SystemExit(f"image tag is not an explicit non-floating version: {service}={image_tag}")
+
+# The diagnostic table is not a public API. Validate the effective (merged)
+# bindings, not only the reusable Compose file: private overrides can widen it.
+def private_table_binding(port):
+    if isinstance(port, dict):
+        host, published, target, protocol = (port.get(k) for k in ("host_ip", "published", "target", "protocol"))
+        protocol = protocol or "tcp"
+    else:
+        address, _, protocol = str(port).partition("/")
+        parts = address.rsplit(":", 2)
+        if len(parts) != 3:
+            return False
+        host, published, target = parts
+        host, protocol = host.strip("[]"), protocol or "tcp"
+    try:
+        ip = ipaddress.ip_address(host or "")
+        return (ip.is_loopback or ip in ipaddress.ip_network("100.64.0.0/10")) and str(published) == "9083" and str(target) == "9080" and protocol == "tcp"
+    except ValueError:
+        return False
+
+for port, expected in (
+    ("127.0.0.1:9083:9080", True), ("100.94.238.35:9083:9080", True),
+    ("[::1]:9083:9080", True), ("0.0.0.0:9083:9080", False),
+    ("[::]:9083:9080", False), ("9083:9080", False),
+    ({"host_ip": "0.0.0.0", "published": "9083", "target": 9080}, False),
+    ({"host_ip": "127.0.0.1", "published": "9083", "target": 9080}, True),
+    ({"published": "9083", "target": 9080}, False),
+    ("203.0.113.1:9083:9080", False),
+):
+    if private_table_binding(port) != expected:
+        raise SystemExit(f"models-table binding self-test failed: {port}")
+table_ports = services.get("models-table-host-netns", {}).get("ports") or []
+if not table_ports or not all(private_table_binding(port) for port in table_ports):
+    raise SystemExit("models-table port 9083 must publish only on loopback or an explicit Tailscale address, never wildcard/public")
 
 network_members = {name: members(name) for name in networks}
 
