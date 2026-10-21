@@ -87,6 +87,17 @@ Conclusion: keeper's rewrites are within what the deployed upstream gateways alr
   - Host now: load 2.61/2.22/1.97, swap used 1472/4480 MiB, memory PSI some≈10 / full≈4, CPU PSI some≈35. No sysstat history, so no 24 h swap/load curve.
 - 6.5 **not demonstrated**: WS `previous=false` share is 63.93% (4654 false / 2626 true) versus 56.27% baseline; the last three hours (2026-10-21T00–02Z) are 85–97% false. This cannot be attributed to D: plugin `9b2684e` was installed 2026-10-20 04:35Z, but five local Pi processes still running were started 2026-10-19 07:20Z and keep the pre-D plugin (`480f11b`); only later processes load D. Keeper logs carry no client identity and include other gateway clients, so the aggregate share measures a client mix, not D. `0dfd75d` was installed 2026-10-21 02:08Z and no running process has loaded it. 6.5 is **not measurable yet**, not shown to have failed. Measuring it needs all Pi processes restarted on the current plugin, then client-side `WS/full` vs `WS/continuation` transport-label counts (or a client-distinguishing keeper log field).
 
+## Keeper production acceptance — 2026-10-21 02:25Z (read-only)
+
+Verdict: **accepted with observations** for the keeper-oom production fix (image `df45c7f`, revision label matches, user `65534:65534`).
+
+- Memory: cgroup `memory.max` 384 MiB, `memory.swap.max` 384 MiB; `memory.peak` 60.7 MiB, `memory.swap.peak` 27.8 MiB over ~21.8 h of real traffic; `memory.events` max/oom/oom_kill 0; restarts 0. Previous incident: 47 OOM kills in ~8.5 h at 96 MiB.
+- Disk cache: named volume on host ext4, owned `nobody:nogroup`; `keeper.db` 43.5 MB with deduplicated shared content; store hit the configured 200 MiB live cap once, otherwise ~21 MB. Host disk 8.0 GB free.
+- Load: 16 847 turns; duration p50 6.4 s, p95 32.8 s, p99 50.1 s, max 60.0 s (includes upstream generation time). `pids` 11/64.
+- Bounded admission works as designed: 9 explicit `working-set wait exceeded` rejections (8 HTTP, 1 WS), no process death.
+- Observation to explain (not a demonstrated fault): 2 660 `http relay ended early: context canceled` lines (~27% of HTTP turns), logged with status 200. apisix-models shows only 200/502/503 for the same path and no 499, so the cancellations did not surface as client-visible failures in gateway logs. Likely upstream-side cancellation of the keeper's relay; root cause not investigated.
+- Not covered here: 0.5 CPU acceptance (out of scope), live disk-full/slow-disk behaviour (offline test #49).
+
 ## Authorization update
 
 Existing-scope delivery approval verified from direct user messages `5aab6f6d`/`7f1db647` in session01a15472. Repeated per-step consent is no longer required for these existing tasks; verification, rollback, inference scope and authentication restrictions remain. D plugin repository currently has another release writer; wait for explicit ownership handoff before editing it.
