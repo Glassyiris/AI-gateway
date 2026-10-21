@@ -96,7 +96,7 @@ Independent reviews `c8c14a59` (candidate `9b2684e`) and `659a5e4d` (published p
 | P2-1: accepted non-durable full-history repair loses the replay fence; after partial output + `error`/`response.failed`, a same-bridge retry sends a 4th frame | reproduced (`responses-websocket-fetch.ts:643–651`, `:708–711`) | not applicable: no non-durable cross-socket anchor; closest connection-local repair stops at 3 frames |
 | P2-2: after a caller-rooted turn, reconnect loses caller-owned provenance and checkpoint-attests the descendant as full history | reproduced; older `resp_1` anchor is resurrected (`:826–863`, `:189–192`) | reproduced with different wire: no parent sent, descendant still attested (`openai-responses-websocket.ts:804–858`, `:1231–1272`) |
 
-Mechanism parity is **not** established: the plugin has an in-memory cross-socket anchor cache that native lacks. 5.2 stays unchecked. The operator selected keeping cross-socket continuation memory and implementing/fixing it on both sides, while preserving recently added behavior and addressing root causes. Product changes have not started. The planning child failed with `Connection error`; one same-protocol retry (`19bf64d3`) then failed with HTTP 429 `model_cooldown` / `Usage limit reached`. No design report was produced; no silent model/execution-mode fallback.
+Mechanism parity is **not** established: the plugin has an in-memory cross-socket anchor cache that native lacks. 5.2 stays unchecked. The operator selected keeping cross-socket continuation memory and implementing/fixing it on both sides, while preserving recently added behavior and addressing root causes. Product changes have not started. The planning child failed with `Connection error`; one same-protocol retry (`19bf64d3`) then failed with HTTP 429 `model_cooldown` / `Usage limit reached`. No design report was produced by those failed runs. The operator subsequently selected `openai-api-extension/gpt-6.1-sol`; task-scoped fresh planning and read-only directory-diagnosis lanes were launched in async workflow `2f26039d`. This is an explicit per-run model override, not a global config change or automatic fallback. Exact source exports for planning are indexed by `/var/tmp/pi-live-acceptance-20261020/d-p2-fix/sol-plan/MANIFEST.json`, with zero Git-blob mismatches.
 
 ## Model directory (#52) — still reproduces (2026-10-21, read-only, 24 h logs)
 
@@ -125,6 +125,14 @@ Verdict: **accepted with observations** for the keeper-oom production fix (image
 - Unthrottled control passed: JSON/SSE/WS 3/3, exactly three upstream requests, intact input and working WS ping. The 20 ms delay group stopped before workload with `fusermount3: mount failed: Operation not permitted`; no escalation or alternative execution workaround.
 - No workload container was OOMKilled. Sampled peaks v1/v2/control: 73,695,232 / 57,438,208 / 11,640,832 bytes. Cgroups disappeared on exit, so final event counters are not asserted from missing reads. Task-owned containers/mounts were verified absent after cleanup; evidence retained.
 - Verdict: **#49 remains open**. Cache-transaction protection has narrow evidence; full wire failure/recovery and actual delayed-I/O behavior are not demonstrated. Original failures, v1 fixture and v2 correction all retained; no test assertions relaxed.
+
+## Pi Release A — marker, fixture and CI verified (2026-10-21 04:34Z)
+
+- Stable release `xz-v1.3.0-xz.357.1.g99aba2a8`, source/main `99aba2a8862fc755d0f823e035f10dd43b1d5462`; GitHub release exists, non-draft/non-prerelease, 19 assets.
+- Parent independently read the source commit's `record upstream sync inputs` marker and asserted exact full tips: transport `82cb3596`, compression `ce3b3e06`, transport-indicator `434931f4`, process-ownership `8cd39e7c`, single-executable `bea3645a` (full hashes in `/var/tmp/pi-live-acceptance-20261020/release-A-parent-verification.json`). All five match.
+- `packages/env/daemon/src/supervise.rs` Git blob `feceac54a07264ee4133a3f9d7234865323df9b5` exactly matches the reviewed test-fixture repair, not merely its marker reference.
+- Independently read CI: [Upstream Sync 39532540716](https://github.com/xz-dev/pi/actions/runs/39532540716) and [Publish 39533736430](https://github.com/xz-dev/pi/actions/runs/39533736430) both completed successfully. Publish head equals the release source.
+- Peer separately reports binary acceptance and Sigstore verification in `/var/tmp/pi-job-control-20261021/release-A-verified.json`; parent did not repeat those checks. Publication is not local installation/reload, does not fix the open P2s and does not accept 6.5.
 
 ## Authorization update
 
