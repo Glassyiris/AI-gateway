@@ -96,13 +96,13 @@ Independent reviews `c8c14a59` (candidate `9b2684e`) and `659a5e4d` (published p
 | P2-1: accepted non-durable full-history repair loses the replay fence; after partial output + `error`/`response.failed`, a same-bridge retry sends a 4th frame | reproduced (`responses-websocket-fetch.ts:643–651`, `:708–711`) | not applicable: no non-durable cross-socket anchor; closest connection-local repair stops at 3 frames |
 | P2-2: after a caller-rooted turn, reconnect loses caller-owned provenance and checkpoint-attests the descendant as full history | reproduced; older `resp_1` anchor is resurrected (`:826–863`, `:189–192`) | reproduced with different wire: no parent sent, descendant still attested (`openai-responses-websocket.ts:804–858`, `:1231–1272`) |
 
-Mechanism parity is **not** established: the plugin has an in-memory cross-socket anchor cache that native lacks. 5.2 stays unchecked. Fixing requires changes on both sides plus regressions and a new review; not started.
+Mechanism parity is **not** established: the plugin has an in-memory cross-socket anchor cache that native lacks. 5.2 stays unchecked. The operator selected keeping cross-socket continuation memory and implementing/fixing it on both sides, while preserving recently added behavior and addressing root causes. Product changes have not started. The planning child failed with `Connection error`; one same-protocol retry (`19bf64d3`) then failed with HTTP 429 `model_cooldown` / `Usage limit reached`. No design report was produced; no silent model/execution-mode fallback.
 
 ## Model directory (#52) — still reproduces (2026-10-21, read-only, 24 h logs)
 
 - apisix-models `GET /v1/models`: 71 requests, p50 0.19 s, p95 15.0 s, max 30.0 s; 10 × 200 in 5–14 s, 6 × 499 at ~15 s (client gave up), 1 × 504 at 30 s. `/rk/v1/models`: 39 requests, 10 × 200 in 5–14 s, 7 × 499 at ~15 s.
 - Ingress apisix `GET /v1/models`: 6425 requests (6170 × 404), 154 × 499, p99 23 s, max 324 s.
-- models-enricher logs repeated `source fetch failed … context canceled` (models.dev) and Ollama `/api/show` misses; `overall_deadline` 25 s, catalog cache TTL 5 min. Slow refreshes line up with cache misses, matching the earlier 27.8 s Sub2API Codex-manifest path in `PLAN/pi-first-request-20261019.md`.
+- models-enricher logs repeated `source fetch failed … context canceled` (models.dev) and Ollama `/api/show` misses; `overall_deadline` 25 s, catalog cache TTL 5 min. The earlier 27.8 s Sub2API Codex-manifest path in `PLAN/pi-first-request-20261019.md` is a candidate explanation; the aggregate logs do not establish per-request cache-miss correlation or time attribution. The read-only diagnosis child failed with `Connection error` and produced no new report.
 - Verdict: **not passed**. Roughly 1 in 5 directory refreshes still takes 5–30 s and about 1 in 10 hits the 15 s client timeout. Client-side ECONNRESET was not measured (no client logs in scope). No fix attempted.
 
 ## Keeper production acceptance — 2026-10-21 02:25Z (read-only)
@@ -113,8 +113,18 @@ Verdict: **accepted with observations** for the keeper-oom production fix (image
 - Disk cache: named volume on host ext4, owned `nobody:nogroup`; `keeper.db` 43.5 MB with deduplicated shared content; store hit the configured 200 MiB live cap once, otherwise ~21 MB. Host disk 8.0 GB free.
 - Load: 16 847 turns; duration p50 6.4 s, p95 32.8 s, p99 50.1 s, max 60.0 s (includes upstream generation time). `pids` 11/64.
 - Bounded admission works as designed: 9 explicit `working-set wait exceeded` rejections (8 HTTP, 1 WS), no process death.
-- Observation to explain (not a demonstrated fault): 2 660 `http relay ended early: context canceled` lines (~27% of HTTP turns), logged with status 200. apisix-models shows only 200/502/503 for the same path and no 499, so the cancellations did not surface as client-visible failures in gateway logs. Likely upstream-side cancellation of the keeper's relay; root cause not investigated.
+- Observation to explain (not a demonstrated fault): 2 660 `http relay ended early: context canceled` lines (~27% of HTTP turns), logged with status 200. apisix-models shows only 200/502/503 for the same path and no 499. These access statuses do **not** prove complete client-visible SSE output: a stream can fail after 200 headers. Cancellation direction, cause and user-visible completion impact remain unproven.
 - Not covered here: 0.5 CPU acceptance (out of scope), live disk-full/slow-disk behaviour (offline test #49).
+
+## Offline disk acceptance (#49) — not demonstrated / blocked (2026-10-21)
+
+- Exact deployed source `df45c7fdd4e4ceeead26ff7b1008251737d4e86a`; all 42 archived tracked files matched Git blobs. Scratch assertions only, no product edits. Root/report: `/var/tmp/keeper-disk-acceptance-20261021-kWKCka/REPORT.md`.
+- Isolation: 48 MiB ext4 image without journal via temporary fuse2fs, disk-backed on host ZFS; no external network, read-only container root, 384 MiB RAM, no swap, PID 64. FUSE daemon outside the test cgroup. Not production ext4 or a capacity benchmark; no CPU acceptance.
+- ENOSPC v1: real cache-commit ENOSPC preserved old alias, private pin and store invariants, with recovery after space release. JSON/SSE/WS refusal assertions failed because the 1 MiB filler had not established exhaustion for small writes; do not call this a product failure or pass.
+- ENOSPC v2: 4 KiB writes also reached ENOSPC, but the fixture's zero-free-block self-check found `Statfs.Bfree=1229` and stopped before wire assertions. Available-versus-reserved block semantics remain unresolved; no further fixture changes this round.
+- Unthrottled control passed: JSON/SSE/WS 3/3, exactly three upstream requests, intact input and working WS ping. The 20 ms delay group stopped before workload with `fusermount3: mount failed: Operation not permitted`; no escalation or alternative execution workaround.
+- No workload container was OOMKilled. Sampled peaks v1/v2/control: 73,695,232 / 57,438,208 / 11,640,832 bytes. Cgroups disappeared on exit, so final event counters are not asserted from missing reads. Task-owned containers/mounts were verified absent after cleanup; evidence retained.
+- Verdict: **#49 remains open**. Cache-transaction protection has narrow evidence; full wire failure/recovery and actual delayed-I/O behavior are not demonstrated. Original failures, v1 fixture and v2 correction all retained; no test assertions relaxed.
 
 ## Authorization update
 

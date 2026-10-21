@@ -62,6 +62,12 @@ Implementation evidence for 2.1–2.5/2.7 is the isolated candidate `/var/tmp/ke
 - [x] 5.1 Independent review of the keeper routing, credential and owner changes, the apisix routes and the Lua fallback against the specs. Verify there are no P1/P2 findings open, and that minor findings are recorded as follow-ups.
 - [ ] 5.2 Independent review of the extension change. Verify the same criteria.
 
+## Acceptance follow-up status — 2026-10-21
+
+- **#49 offline disk-full/slow-disk acceptance remains open.** A narrow real-ENOSPC cache-commit rollback passed; corrected full-disk wire fixture self-check and delayed-filesystem mounting remain blocked. The unthrottled control is not slow-disk evidence. See `verification.md` for preserved failed runs, source identity and limits.
+- **5.2 remains unchecked.** Operator selected paired native/plugin cross-socket memory and root-cause fixes, preserving recent features. Planning retry failed with HTTP 429 `model_cooldown`; product edits have not started.
+- **6.5 remains unchecked.** Operator will restart all Pi processes; then use client-side transport labels per session. Mixed-client keeper `previous=false` aggregates cannot prove plugin improvement.
+
 ## 6. Deployment (existing-scope approval verified; validation and rollback gates remain)
 
 - [x] 6.1 Add the scoped Ansible dispatch `deploy-responses-path`:
