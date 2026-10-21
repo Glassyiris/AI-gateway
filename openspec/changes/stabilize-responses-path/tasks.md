@@ -65,7 +65,8 @@ Implementation evidence for 2.1–2.5/2.7 is the isolated candidate `/var/tmp/ke
 ## Acceptance follow-up status — 2026-10-21
 
 - **#49 offline disk-full/slow-disk acceptance remains open.** A narrow real-ENOSPC cache-commit rollback passed; corrected full-disk wire fixture self-check and delayed-filesystem mounting remain blocked. The unthrottled control is not slow-disk evidence. See `verification.md` for preserved failed runs, source identity and limits.
-- **5.2 remains unchecked.** Operator selected paired native/plugin cross-socket memory and root-cause fixes, preserving recent features. Planning retry failed with HTTP 429 `model_cooldown`; the operator then selected task-scoped `gpt-6.1-sol` planning and read-only diagnosis. Product edits have not started.
+- **5.2 remains unchecked.** Operator selected paired native/plugin cross-socket memory and root-cause fixes, preserving recent features. Planning retry failed with HTTP 429 `model_cooldown`; the operator then selected task-scoped `gpt-6.1-sol` planning and read-only diagnosis. Both reports are now delivered. The paired design remains conditional on legacy/metadata/compaction choices and focused compatibility review; product edits have not started.
+- **#52 directory acceptance remains open.** Read-only diagnosis and parent offline evidence checks are complete, but not a repair. Both basic and original/catalog legs have slow examples; the dominant 404 cohort matches unauthenticated liveness probes. Remaining phase ownership and client ECONNRESET are unproven. Timing/equivalence or production changes require a separate implementation decision.
 - **6.5 remains unchecked.** Operator will restart all Pi processes; then use client-side transport labels per session. Mixed-client keeper `previous=false` aggregates cannot prove plugin improvement.
 
 ## 6. Deployment (existing-scope approval verified; validation and rollback gates remain)
