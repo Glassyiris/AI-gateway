@@ -1,6 +1,6 @@
 ## 0. Preconditions
 
-- [ ] 0.1 Confirm the keeper streaming-memory core (PLAN/keeper-oom.md) is accepted and deployed, and record its keeper commit and image digest as this change's base. Verify that `docker inspect` of production keeper shows that digest and that the named cache volume is mounted.
+- [x] 0.1 Confirm the keeper streaming-memory core (PLAN/keeper-oom.md) is accepted and deployed, and record its keeper commit and image digest as this change's base. Verify that `docker inspect` of production keeper shows that digest and that the named cache volume is mounted.
 - [x] 0.2 Record the production baseline: 24 h counts of 127-byte selector 503s, keeper `ws previous=false/true`, apisix requests with upstream `127.0.0.1:9080`, and container IDs of all services. Verify the numbers are saved in `verification.md`.
 
 ## 1. A — Last-known-good fallback in the apisix selector
@@ -59,7 +59,7 @@ Implementation evidence for 2.1–2.5/2.7 is the isolated candidate `/var/tmp/ke
 
 ## 5. Review
 
-- [ ] 5.1 Independent review of the keeper routing, credential and owner changes, the apisix routes and the Lua fallback against the specs. Verify there are no P1/P2 findings open, and that minor findings are recorded as follow-ups.
+- [x] 5.1 Independent review of the keeper routing, credential and owner changes, the apisix routes and the Lua fallback against the specs. Verify there are no P1/P2 findings open, and that minor findings are recorded as follow-ups.
 - [ ] 5.2 Independent review of the extension change. Verify the same criteria.
 
 ## 6. Deployment (existing-scope approval verified; validation and rollback gates remain)

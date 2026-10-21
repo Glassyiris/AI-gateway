@@ -77,6 +77,16 @@ Conclusion: keeper's rewrites are within what the deployed upstream gateways alr
 - D: `openai-api-pi-extension` main `75f8e03..9b2684e` (unsigned per operator decision). Independent review: reviewer subagent failed on subscription quota; parent reviewed the diff and ran the full suite on the identical copy, 310/310 pass. Host-first load in the user's Pi requested from the plugin owner session; real HTTP/WS turns pending there.
 - Not claimed: 24 h stability (6.4), `WS/full` ratio change (6.5 needs plugin rollout), CPU acceptance, model-directory latency.
 
+## Acceptance check — 2026-10-21 02:08Z (read-only)
+
+- 0.1 base: production keeper now runs `ghcr.io/xz-dev/response-keeper:df45c7f…@sha256:badb1a6c74e75341842774293b82361c6ea6c1d9cf153cbc73fde007098f386c`, the direct successor of reviewed `2d269bc` (`fix: serve turns uncached on storage failure and end failed turns`, pinned by AI-gateway `5784f95`). Named volume `ai-gateway_response-keeper-cache` mounted at `/var/tmp/response-keeper` (47 MB). Started 2026-10-20T04:34:57Z, restarts 0, OOMKilled false; cgroup `memory.events` max/oom/oom_kill all 0, `memory.peak` ≈ 60.7 MiB of the 384 MiB limit (GOMEMLIMIT 256 MiB). `sock_throttled` 2713 (socket memory pressure, not OOM).
+- 5.1: independent reviewer `a041771c` approved keeper routing/credentials/owner with no P1/P2 (`/var/tmp/keeper-oom/keeper-routing-b-review.md`); gateway route patch is byte-identical to the integration-tested candidate.
+- 6.4 interim (keeper logs 04:35Z→02:08Z ≈ 21.5 h; apisix-models logs only since its 13:19Z recreate ≈ 12.8 h, so not yet a full 24 h):
+  - apisix-models: 4978 Responses requests, **all** upstream `127.0.0.1:8085` (keeper), **0** to `127.0.0.1:9080`; 5 × 503, **0** with the 127-byte selector signature (baseline 117/24 h).
+  - keeper: 1 × 503 (baseline 179). Other errors: WS 400 × 91, 429 × 42, 502 × 52, 403 × 2; HTTP 502 × 3. 429/502 are upstream statuses passed through.
+  - Host now: load 2.61/2.22/1.97, swap used 1472/4480 MiB, memory PSI some≈10 / full≈4, CPU PSI some≈35. No sysstat history, so no 24 h swap/load curve.
+- 6.5 **not demonstrated**: WS `previous=false` share is 63.93% (4654 false / 2626 true) versus 56.27% baseline; the last three hours (2026-10-21T00–02Z) are 85–97% false. Local Pi processes started after the plugin with D (`9b2684e`, installed 2026-10-20 04:35Z) was loaded, so D was active for this machine's traffic, but keeper logs carry no client identity and include other gateway clients. `0dfd75d` was installed at 02:08Z and is not yet loaded by running processes. The WS/full share has not dropped; cause is open.
+
 ## Authorization update
 
 Existing-scope delivery approval verified from direct user messages `5aab6f6d`/`7f1db647` in session01a15472. Repeated per-step consent is no longer required for these existing tasks; verification, rollback, inference scope and authentication restrictions remain. D plugin repository currently has another release writer; wait for explicit ownership handoff before editing it.
