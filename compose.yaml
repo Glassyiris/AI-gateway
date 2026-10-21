@@ -645,7 +645,7 @@ services:
       - ./apisix-models/routing_selector.lua:/opt/apisix/custom/routing_selector.lua:ro,Z
       - ./scripts/start-apisix-models.sh:/usr/local/bin/start-apisix-models:ro,Z
     healthcheck:
-      test: [CMD, /bin/bash, -ec, "exec 3<>/dev/tcp/127.0.0.1/9080; printf 'GET /healthz HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3; IFS= read -r line <&3; true"]
+      test: [CMD, /bin/bash, -ec, "exec 3<>/dev/tcp/127.0.0.1/9080; printf 'GET /healthz HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3; IFS= read -r line <&3; [[ \"$$line\" == *\" 200 \"* ]]"]
       interval: 15s
       timeout: 5s
       retries: 3

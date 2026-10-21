@@ -1,0 +1,126 @@
+# Gateway health and bounded recovery
+
+Health has three separate meanings:
+
+- **Local liveness:** this component can perform its own bounded operation.
+- **Dependency readiness:** required upstream components respond. A readiness failure does not authorize restarting every downstream proxy.
+- **Request success:** a real user request completes, including its terminal stream event. Local health and HTTP 200 alone do not prove this.
+
+## Application recovery
+
+`scripts/ops/gateway-recovery.py` runs on the Docker host through `ai-gateway-recovery.timer`. It uses Python's standard library, the local Docker Unix socket, and Linux network namespaces. Python 3.12 or later with `os.setns` is required. Probes use direct local sockets, not proxy environment variables, and never request provider inference.
+
+| Application | Probe | Meaning |
+| --- | --- | --- |
+| cli-proxy-api | Authenticated `GET /v1/models`, HTTP 200 and a JSON `data` array | CPA can serve its local catalog read path |
+| sub2api | `GET /health`, HTTP 200 | Application health endpoint; dependency semantics belong to Sub2API |
+| response-keeper | `GET /healthz`, HTTP 200 | Keeper HTTP liveness, not proof of cache writes or hits |
+| models-enricher | `GET /healthz`, HTTP 200 | Enricher local liveness |
+| ai-sse-keepalive-proxy | `GET /healthz`, HTTP 200 | Keepalive proxy local liveness |
+| apisix | Local `GET /v1/models`, expected HTTP 404 | APISIX's local rejection route responds; no upstream request |
+| apisix-models | Local `GET /healthz`, HTTP 200 | APISIX's explicit local health route responds; no CPA request |
+
+The CPA key comes from the existing keeper container environment. It remains in process memory, not arguments or logs. A missing key or HTTP 401/403 is **unknown**, not a restart decision. An inaccessible namespace is also unknown. Deployment refuses unknown or failed probes.
+
+Recovery policy:
+
+- 120-second startup grace; three consecutive failed checks.
+- Ten-minute cooldown; at most three attempts per application per hour.
+- At most one application restart per invocation; no database, cache, namespace owner, relay, or provider-sidecar restart.
+- Recheck Compose ownership, exact container ID, start time, and running/unpaused state immediately before mutation.
+- Preserve cooldown/history across container recreation. Write the attempt to an atomic, mode-0600 state file **before** asking Docker to restart. An unknown restart outcome consumes its budget and is not retried immediately.
+- Respect stopped, paused, or restarting containers. Docker's restart policy handles ordinary process exits.
+- Probe socket timeout is three seconds; a six-second wall-clock alarm bounds each namespace probe, including slow response bodies. The original namespace is restored in `finally`.
+- A nonblocking lock prevents overlap. The systemd service has a 120-second ceiling, 64 MiB memory limit, and 10% CPU quota. The timer waits 30 seconds after each completed invocation, with bounded jitter.
+
+This does not prove that every upstream preparation/write stall also blocks the catalog. It does not identify CPA's memory-growth root cause. A successful systemd invocation means the guard ran; inspect individual `checks[].ok` and `action`, not only the unit result.
+
+## Deploy and inspect
+
+Deploy the explicit `apisix-models` local health route and strict health status check first. Its old `/healthz` catch-all reached CPA; that would turn an upstream outage into an unsafe proxy-restart signal. The old shell check also accepted HTTP 502 and 503 because it ended with `true`.
+
+From `ansible/`:
+
+```bash
+ansible-playbook ops.yml --tags deploy-recovery -e ai_ops_mode=plan
+ansible-playbook ops.yml --tags deploy-recovery -e ai_ops_mode=apply
+```
+
+The operation copies the recovery script, its read-only `gateway_health.py` role probes, and units; checks application probes without restarting, verifies units, and enables the timer. It does not deploy application routes or recreate containers. Inspect the route and healthcheck change separately before deploying them.
+
+```bash
+systemctl status ai-gateway-recovery.timer --no-pager
+systemctl show ai-gateway-recovery.service \
+  --property=Result,ExecMainStatus,MemoryPeak,CPUUsageNSec
+journalctl -u ai-gateway-recovery.service -n 12 --no-pager -o cat
+```
+
+Guard state is `/var/lib/ai-gateway-recovery/state.json`. Do not erase it to bypass recovery limits.
+
+For a controlled diagnostic window, stop both the timer and any in-flight invocation:
+
+```bash
+systemctl stop ai-gateway-recovery.timer ai-gateway-recovery.service
+```
+
+Coordinate an explicit window-end receipt before resuming:
+
+```bash
+systemctl start ai-gateway-recovery.timer
+```
+
+Stopping does not disable boot enablement. To withdraw the recovery installation's automatic operation, disable the timer and stop the in-flight service:
+
+```bash
+systemctl disable --now ai-gateway-recovery.timer
+systemctl stop ai-gateway-recovery.service
+```
+
+A restart request already accepted by Docker can still finish after the guard stops. Check state and container identity before taking further action.
+
+## Verification and limits
+
+```bash
+python3 scripts/test-gateway-recovery.py
+```
+
+The tests exercise strict production Compose commands against HTTP 200/502/503, authentication and JSON checks, a live health endpoint with a stuck catalog, startup grace, consecutive failures, cooldown/hourly limits across instances, namespace restoration and wall-clock timeout, and persistence before an unknown restart outcome. They also reject another process's listener in a shared namespace, a missing supervised relay port, default-route escape, a missing owned TUN handle, non-PONG Redis responses, stale native success, and confusing worker progress with dependency readiness. Restart API effects are mocked; this is not a production fault-injection result.
+
+On 2026-10-20 the initial subprocess-heavy guard reached its 64 MiB limit. Replacing Docker CLI and repeated Python startup with the Unix-socket API and one interpreter reduced a measured systemd invocation to 22,298,624 bytes peak memory, 0.216 CPU seconds, and about two wall-clock seconds under the same limits. Seven probes passed and no recovery budget was consumed. These are short-window measurements, not a 24-hour stability result.
+
+## Full-stack host observations
+
+The deployed host guard now observes every running container, including the standalone relay. The automatic restart allowlist remains exactly the seven applications above. Additional roles only produce observations; they cannot enter the restart decision path.
+
+| Role | Deployed observation | Meaning / limit |
+| --- | --- | --- |
+| 25 TCP relays | Exact configured IPv4 address/port, listening socket inode owned by the relay; the existing six-port shell supervisor checks its actual direct children and every port | Local listener, not upstream readiness. Another process in the shared namespace cannot make this green |
+| 12 namespace owners | Interfaces and connected routes match attached IPv4 networks; no usable IPv4/IPv6 default route | Checks the current deny-default topology, not a sleeping PID |
+| provider-sidecar-tunnel | Actual tun2proxy process, its owned `/dev/net/tun` handle, associated interface, and its active main-table default route | Current deployed routing was inspected first; do not reuse this route contract for a policy/split-routing deployment without adapting it |
+| cloudflared | Local `:20241/ready`, strict HTTP 200 | Tunnel readiness; Cloudflare dependency failure does not authorize restart |
+| aisix-status | Local `:8080/`, strict expected 404 | Local handler's rejection route, not AISIX readiness |
+| AISIX | Its actual `172.30.68.2:9090/metrics`, strict HTTP 200 | Existing metrics listener, not an assumed loopback binding or an inference request |
+| model-catalog-sidecar | `172.30.41.3:8080/models-table/refresh`, **GET**, strict expected 403 | Nginx's local method restriction rejects GET before proxying; never POST or trigger a refresh |
+| Redis | Direct local RESP PING, exact `+PONG` | Error replies are not success; an authentication error is unknown, not proof the process died |
+| Squid/Unbound | Squid's local rejection of `GET *`, expected HTTP 400, plus native resolver/Squid readiness reported separately | No destination lookup or provider request |
+| PostgreSQL | Audited native `pg_isready` with fresh engine result | Accepting PostgreSQL connections, not proof of application credentials or query correctness |
+| provider-sidecar | Audited native authenticated local HTTP health and virtual-DNS check, with fresh engine result | Includes DNS readiness; no auto-restart on upstream failure |
+| cpa-model-sync | Most recent complete JSON cycle summary from at most 64 KiB of existing json-file logs; within twice its configured interval plus 120 seconds | Progress and dependencies are separate: `ok=true, ready=false` is a live worker with failed/unconfirmed channels, not fully healthy |
+
+HTTP addresses above match the current static topology. Update them deliberately when that topology changes. Missing evidence, unsupported roles, inaccessible process files, and stale native health results are unknown, never fixed-success fallbacks. New containers with unknown roles do not silently become green.
+
+The emitted JSON keeps `checks` for seven application recovery decisions and adds `coverage.running`, `coverage.observed`, and per-container `coverage.checks`. Compare running/observed counts and inspect **both** `ok` and any `ready` field. A successful unit result is not an all-dependencies-green signal.
+
+Production verification on 2026-10-20 at 14:56 UTC recorded 54 running / 54 observed, all 54 role/liveness checks passing, no unknown observations, unchanged running container IDs, and zero guard restart attempts. The model-sync worker still reported four failed dependencies (`ok=true, ready=false`); this is an open readiness issue, not suppressed as green. Counts are point-in-time, not a deployment contract.
+
+A bounded read-only follow-up at 15:36 UTC inspected the existing 15:32 cycle: zero updates, 13 unchanged, four failed, zero unconfirmed, and one configured skip. Two OpenAI-compatible channels and one Codex channel reported `upstream request failed`. In the current source this means the management `api-call` JSON did not contain a successful `status_code`; the static log does not identify the exact status, so it does not prove expired credentials or a particular provider fault. One Claude channel reported `required string missing`. A management-only GET at 15:43 returned 200 using the worker's existing identity and actual hosts mapping: that entry had a key and auth index but no nonempty `base-url`. The current inventory code requires that field before making an upstream request. This identifies a concrete compatibility gap to investigate; deployed-source binding and the correct optional-base/default contract still need verification before changing behavior. No refresh, upstream catalog call, model write, or restart was triggered by these follow-up inspections.
+
+Under the unchanged 64 MiB / 10% CPU limits, the full-coverage systemd invocation used 20,099,072 bytes peak memory and 0.295 CPU seconds over about three seconds. These are short-window measurements, not a 24-hour or whole-gateway CPU acceptance result.
+
+## Remaining native Docker startup gap
+
+Whole-stack host monitoring is deployed. It does **not** rewrite existing Docker health metadata or dependency gates. In particular, the tunnel's native `--version` check remains insufficient, even though the host now performs the real process/interface/route check. Do not treat its Docker `healthy` label alone as tunnel readiness.
+
+The pinned tunnel image is scratch-based; runtime inspection found no shell, BusyBox, Python, or grep. Replacing its in-container probe requires an actual validated executable available inside that image, not a shell command that cannot run. Installing such a helper or changing the image/mounts is distinct from the approved host guard deployment. Recreating its namespace owner also requires a coupled, drift-protected operation with provider-sidecar and both adjacent relays; never rebuild the owner alone or blindly restart the full stack.
+
+The operator explicitly chose to preserve availability and defer that native startup-gate repair to a separate maintenance window. This phase must not add a tunnel helper, image, or mount, or recreate the sidecar group. Host observations remain active; the native startup gap is not closed. No database, namespace owner, sidecar, application image, credentials, or limits were changed by the full-coverage host rollout.

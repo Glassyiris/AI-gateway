@@ -52,6 +52,16 @@ global_rules:
             - ["route_id", "~=", "response-keeper-responses"]
 
 routes:
+  # 本组件存活检查不访问CPA；依赖故障由各组件自身检测，避免级联重启。
+  - id: local-health
+    uri: /healthz
+    methods: [GET, HEAD]
+    priority: 1000
+    plugins:
+      request-termination:
+        status_code: 200
+        content_type: application/json
+        body: '{"status":"ok"}'
   # 两种Responses入口统一经过keeper；此路由不读取或解析请求body。
   - id: response-keeper-responses
     uris:

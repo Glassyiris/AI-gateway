@@ -341,7 +341,7 @@ When upgrading Sub2API, re-audit that provider/upstream authentication failures 
 
 ## Operations
 
-Sub2API, AISIX, CLIProxyAPI, models-enricher, AI SSE keepalive proxy, their namespace owners, and adjacent relays are one operational unit. Restart propagation is not reliable across shared namespaces and relay chains. Never use `docker restart` or recreate a namespace owner alone. A proven application-only image replacement may use Compose `up -d --no-deps --no-build <service>` while its namespace owner remains unchanged; broader network or CPA changes require the coupled stack. With the production override, include the provider-sidecar tunnel and both provider-sidecar relays in the same full-stack operation.
+Sub2API, AISIX, CLIProxyAPI, models-enricher, AI SSE keepalive proxy, their namespace owners, and adjacent relays are one operational unit. Restart propagation is not reliable across shared namespaces and relay chains. Never restart or recreate a namespace owner alone, or blindly restart dependent applications together. A proven application-only image replacement may use Compose `up -d --no-deps --no-build <service>` while its namespace owner remains unchanged; broader network or CPA changes require the coupled stack. With the production override, include the provider-sidecar tunnel and both provider-sidecar relays in the same full-stack operation.
 
 ```bash
 source ./scripts/container-runtime.sh
@@ -360,6 +360,8 @@ source ./scripts/container-runtime.sh
 ```
 
 Use explicit endpoint/readiness probes after recreation. Do not make correctness depend on engine healthcheck scheduling.
+
+[Health and bounded recovery](docs/gateway-health-and-recovery.md) separates local liveness from dependency readiness, documents the seven-application host recovery timer and its restart budgets, and documents full-stack host observations plus the remaining native Docker startup-probe gap. Application-only recovery preserves container image/configuration/volumes and its namespace owner; it is not permission to restart the coupled network stack.
 
 Persistent application state lives under ignored `data/`, including the egress CA/policy, CPA config/auth/logs/plugins/runtime SQLite, and Sub2API PostgreSQL/Redis/application data. Back it up before upgrades. Never commit `.env` or `data/`. Losing the egress CA breaks trust for bumped destinations; never rotate it as part of a routine redeploy.
 

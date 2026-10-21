@@ -1,0 +1,54 @@
+---
+- name: Require the supported Docker recovery runtime
+  ansible.builtin.assert:
+    that: _runtime == 'docker'
+    fail_msg: "Recovery uses Docker ownership labels and host network-namespace probes."
+
+- name: Show bounded recovery deployment
+  ansible.builtin.debug:
+    msg: "Install a 30-second host timer; application probes only, 120-second grace, three failures, 10-minute cooldown, at most three restarts/hour/application. No database or netns restarts."
+
+- name: Install bounded recovery guard
+  when: ai_ops_mode == 'apply'
+  block:
+    - name: Ensure recovery script directory exists
+      ansible.builtin.file:
+        path: "{{ ai_ops_deploy_root }}/scripts/ops"
+        state: directory
+        mode: '0755'
+
+    - name: Copy recovery guard and read-only role probes
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../scripts/ops/{{ item }}"
+        dest: "{{ ai_ops_deploy_root }}/scripts/ops/{{ item }}"
+        mode: '0644'
+        backup: true
+      loop: [gateway_health.py, gateway-recovery.py]
+
+    - name: Verify local application probes without restarts
+      ansible.builtin.command:
+        argv: [python3, "{{ ai_ops_deploy_root }}/scripts/ops/gateway-recovery.py"]
+      register: _recovery_observation
+      changed_when: false
+      failed_when: >-
+        _recovery_observation.rc != 0 or
+        ((_recovery_observation.stdout | from_json).checks | selectattr('action', 'equalto', 'observe') | map(attribute='ok') | reject('equalto', true) | list | length > 0)
+
+    - name: Install recovery service and timer
+      ansible.builtin.copy:
+        content: "{{ lookup('file', playbook_dir + '/../scripts/ops/' + item) | replace('/root/AI-gateway', ai_ops_deploy_root) }}\n"
+        dest: "/etc/systemd/system/{{ item }}"
+        mode: '0644'
+        backup: true
+      loop: [ai-gateway-recovery.service, ai-gateway-recovery.timer]
+
+    - name: Validate recovery units
+      ansible.builtin.command: systemd-analyze verify /etc/systemd/system/ai-gateway-recovery.service /etc/systemd/system/ai-gateway-recovery.timer
+      changed_when: false
+
+    - name: Enable bounded recovery timer
+      ansible.builtin.systemd_service:
+        name: ai-gateway-recovery.timer
+        daemon_reload: true
+        enabled: true
+        state: started

@@ -69,6 +69,12 @@ ansible-playbook ops.yml --tags deploy-responses-path \
 # Restart only keeper (clears its disposable history cache).
 ansible-playbook ops.yml --tags restart-response-keeper -e ai_ops_mode=plan
 
+# Bounded host application recovery (Docker only): deploy local APISIX health
+# isolation first. This copies the guard/units, verifies probes, enables the timer;
+# it does not deploy application routes or recreate containers.
+ansible-playbook ops.yml --tags deploy-recovery -e ai_ops_mode=plan
+ansible-playbook ops.yml --tags deploy-recovery -e ai_ops_mode=apply
+
 # rollback last deploy of a component's file set
 ansible-playbook ops.yml --tags rollback -e service=cli-proxy-api
 

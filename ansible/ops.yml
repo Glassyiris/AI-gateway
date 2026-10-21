@@ -8,6 +8,7 @@
 #   ansible-playbook ops.yml --tags deploy-response-keeper [-e ai_ops_mode=plan]  (legacy: also recreates sub2api)
 #   ansible-playbook ops.yml --tags deploy-responses-path [-e ai_ops_mode=plan]
 #   ansible-playbook ops.yml --tags restart-response-keeper [-e ai_ops_mode=plan]
+#   ansible-playbook ops.yml --tags deploy-recovery [-e ai_ops_mode=plan]
 #   ansible-playbook ops.yml --tags rollback-model-sync
 #   ansible-playbook ops.yml --tags rollback           -e service=cli-proxy-api
 #
@@ -363,6 +364,14 @@
       tags: [deploy-models-enricher-config]
 
   tasks:
+    - name: Deploy bounded host recovery
+      ansible.builtin.include_role:
+        name: ai_ops
+        tasks_from: deploy-recovery
+        apply:
+          tags: [deploy-recovery]
+      tags: [deploy-recovery]
+
     # ======================= deploy (component) =======================
     - name: Deploy compose.yaml
       ansible.builtin.include_role:
