@@ -87,6 +87,24 @@ Conclusion: keeper's rewrites are within what the deployed upstream gateways alr
   - Host now: load 2.61/2.22/1.97, swap used 1472/4480 MiB, memory PSI some≈10 / full≈4, CPU PSI some≈35. No sysstat history, so no 24 h swap/load curve.
 - 6.5 **not demonstrated**: WS `previous=false` share is 63.93% (4654 false / 2626 true) versus 56.27% baseline; the last three hours (2026-10-21T00–02Z) are 85–97% false. This cannot be attributed to D: plugin `9b2684e` was installed 2026-10-20 04:35Z, but five local Pi processes still running were started 2026-10-19 07:20Z and keep the pre-D plugin (`480f11b`); only later processes load D. Keeper logs carry no client identity and include other gateway clients, so the aggregate share measures a client mix, not D. `0dfd75d` was installed 2026-10-21 02:08Z and no running process has loaded it. 6.5 is **not measurable yet**, not shown to have failed. Measuring it needs all Pi processes restarted on the current plugin, then client-side `WS/full` vs `WS/continuation` transport-label counts (or a client-distinguishing keeper log field).
 
+## 5.2 D review — changes required (2026-10-21)
+
+Independent reviews `c8c14a59` (candidate `9b2684e`) and `659a5e4d` (published plugin `0dfd75d`, native `82cb3596`), executed from exact git blobs in memory; reports `/var/tmp/pi-live-acceptance-20261020/push-integration/plugin-d-review.md` and `plugin-d-p2-current.md`. Selected suites pass (227/0); the two adversarial cases below fail.
+
+| Finding | Plugin `0dfd75d` | Native `82cb3596` |
+|---|---|---|
+| P2-1: accepted non-durable full-history repair loses the replay fence; after partial output + `error`/`response.failed`, a same-bridge retry sends a 4th frame | reproduced (`responses-websocket-fetch.ts:643–651`, `:708–711`) | not applicable: no non-durable cross-socket anchor; closest connection-local repair stops at 3 frames |
+| P2-2: after a caller-rooted turn, reconnect loses caller-owned provenance and checkpoint-attests the descendant as full history | reproduced; older `resp_1` anchor is resurrected (`:826–863`, `:189–192`) | reproduced with different wire: no parent sent, descendant still attested (`openai-responses-websocket.ts:804–858`, `:1231–1272`) |
+
+Mechanism parity is **not** established: the plugin has an in-memory cross-socket anchor cache that native lacks. 5.2 stays unchecked. Fixing requires changes on both sides plus regressions and a new review; not started.
+
+## Model directory (#52) — still reproduces (2026-10-21, read-only, 24 h logs)
+
+- apisix-models `GET /v1/models`: 71 requests, p50 0.19 s, p95 15.0 s, max 30.0 s; 10 × 200 in 5–14 s, 6 × 499 at ~15 s (client gave up), 1 × 504 at 30 s. `/rk/v1/models`: 39 requests, 10 × 200 in 5–14 s, 7 × 499 at ~15 s.
+- Ingress apisix `GET /v1/models`: 6425 requests (6170 × 404), 154 × 499, p99 23 s, max 324 s.
+- models-enricher logs repeated `source fetch failed … context canceled` (models.dev) and Ollama `/api/show` misses; `overall_deadline` 25 s, catalog cache TTL 5 min. Slow refreshes line up with cache misses, matching the earlier 27.8 s Sub2API Codex-manifest path in `PLAN/pi-first-request-20261019.md`.
+- Verdict: **not passed**. Roughly 1 in 5 directory refreshes still takes 5–30 s and about 1 in 10 hits the 15 s client timeout. Client-side ECONNRESET was not measured (no client logs in scope). No fix attempted.
+
 ## Keeper production acceptance — 2026-10-21 02:25Z (read-only)
 
 Verdict: **accepted with observations** for the keeper-oom production fix (image `df45c7f`, revision label matches, user `65534:65534`).
