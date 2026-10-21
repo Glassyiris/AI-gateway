@@ -252,7 +252,12 @@ fn inventory(
     } else {
         headers.insert("Authorization".into(), json!(format!("Bearer {token}")));
     }
-    let base = nonempty(&entry["base-url"])?.trim_end_matches('/');
+    // CPA's effectiveClaudeBaseURL sends a Claude key without base-url to Anthropic.
+    let base = match (kind, entry["base-url"].as_str()) {
+        ("claude-api-key", None | Some("")) => "https://api.anthropic.com",
+        _ => nonempty(&entry["base-url"])?,
+    }
+    .trim_end_matches('/');
     let mut path = "/v1/models".to_owned();
     if kind == "openai-compatibility" || kind == "codex-api-key" {
         path.push_str("?client_version=");
