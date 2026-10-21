@@ -39,6 +39,12 @@ FAILURES = 3
 COOLDOWN = 600
 HOURLY_LIMIT = 3
 STATE_DIR = Path("/var/lib/ai-gateway-recovery")
+# CPA's loopback-only pprof listener inside its own network namespace.
+CPA_PPROF_PORT = 8316
+PPROF_PROFILES = ("heap", "goroutine")
+PPROF_LIMIT = 16 * 1024 * 1024
+PPROF_TIMEOUT = 10
+PPROF_KEEP = 6
 
 
 def probe_http(port, path, expected, key=None, catalog=False, timeout=3, host="127.0.0.1"):
@@ -135,6 +141,60 @@ def namespace_probe(pid, request):
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, handler)
             os.setns(original.fileno(), 0)
+
+
+def fetch_pprof(port, profile, target):
+    """Stream one debug=1 text profile to disk; never gc=1/seconds, never hold it in memory."""
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=PPROF_TIMEOUT)
+    try:
+        connection.request("GET", f"/debug/pprof/{profile}?debug=1", headers={"Host": "localhost"})
+        response = connection.getresponse()
+        if response.status != 200:
+            return {"profile": profile, "ok": False, "reason": "unexpected_status", "status": response.status}
+        size = 0
+        with open(target, "xb", opener=lambda path, flags: os.open(path, flags, 0o600)) as stream:
+            while chunk := response.read(64 * 1024):
+                size += len(chunk)
+                if size > PPROF_LIMIT:
+                    break
+                stream.write(chunk)
+        if size > PPROF_LIMIT:
+            target.unlink()
+            return {"profile": profile, "ok": False, "reason": "profile_too_large"}
+        return {"profile": profile, "ok": True, "bytes": size}
+    finally:
+        connection.close()
+
+
+def capture_pprof(pid, now):
+    """Best-effort CPA evidence before a decided restart; failures never block recovery."""
+    if not CPA_PPROF_PORT:
+        return [{"ok": None, "reason": "pprof_port_unconfigured"}]
+    directory = STATE_DIR / "pprof"
+    directory.mkdir(mode=0o700, exist_ok=True)
+    stamp = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    results = []
+    with open("/proc/self/ns/net", "rb") as original, open(f"/proc/{pid}/ns/net", "rb") as target:
+        handler = signal.signal(signal.SIGALRM, deadline_expired)
+        try:
+            os.setns(target.fileno(), 0)
+            for profile in PPROF_PROFILES:
+                signal.setitimer(signal.ITIMER_REAL, PPROF_TIMEOUT)
+                try:
+                    results.append(fetch_pprof(CPA_PPROF_PORT, profile, directory / f"{stamp}-{profile}.txt"))
+                except (OSError, http.client.HTTPException) as exc:
+                    (directory / f"{stamp}-{profile}.txt").unlink(missing_ok=True)
+                    results.append({"profile": profile, "ok": False, "reason": type(exc).__name__})
+                finally:
+                    signal.setitimer(signal.ITIMER_REAL, 0)
+        finally:
+            signal.signal(signal.SIGALRM, handler)
+            os.setns(original.fileno(), 0)
+    stamps = sorted({path.name.split("-", 1)[0] for path in directory.glob("*.txt")})
+    for old in stamps[:-PPROF_KEEP]:
+        for path in directory.glob(old + "-*.txt"):
+            path.unlink(missing_ok=True)
+    return results
 
 
 def coverage(containers, report):
@@ -254,6 +314,11 @@ def run(apply):
                     entry["restarts"].append(now)
                     entry["failures"] = 0
                     save(state, filename)
+                    if service == "cli-proxy-api":
+                        try:
+                            row["pprof"] = capture_pprof(current["Pid"], now)
+                        except (OSError, TimeoutError, ValueError) as exc:
+                            row["pprof"] = [{"ok": False, "reason": type(exc).__name__}]
                     try:
                         docker_api("POST", "/containers/" + quote(container["Id"], safe="") + "/restart?t=10", timeout=25)
                         row["action"] = "restarted"

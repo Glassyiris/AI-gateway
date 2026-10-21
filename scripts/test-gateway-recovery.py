@@ -161,6 +161,58 @@ class RecoveryTests(unittest.TestCase):
         self.assertIn("restart_outcome_unknown_cooldown", output.getvalue())
         self.assertNotIn("offline-sensitive-fixture", output.getvalue())
 
+    def test_pprof_capture_streams_bounded_files_and_keeps_recent(self):
+        Handler.body = b"heap profile\n"
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as directory, \
+                mock.patch.object(recovery, "STATE_DIR", Path(directory)), \
+                mock.patch.object(recovery, "CPA_PPROF_PORT", self.port), \
+                mock.patch.object(recovery, "PPROF_KEEP", 2), \
+                mock.patch.object(recovery.os, "setns"):
+            for now in (1000, 2000, 3000):
+                results = recovery.capture_pprof(os.getpid(), now)
+                self.assertEqual([row["ok"] for row in results], [True, True])
+            files = sorted(path.name for path in (Path(directory) / "pprof").iterdir())
+            self.assertEqual(len(files), 4)
+            self.assertFalse(any(name.startswith("19700101T001640Z") for name in files))
+            self.assertEqual(oct((Path(directory) / "pprof" / files[0]).stat().st_mode & 0o777), "0o600")
+            with mock.patch.object(recovery, "PPROF_LIMIT", 4):
+                results = recovery.capture_pprof(os.getpid(), 4000)
+            self.assertEqual({row["reason"] for row in results}, {"profile_too_large"})
+            self.assertFalse(list((Path(directory) / "pprof").glob("19700101T010640Z-*")))
+            with mock.patch.object(recovery, "CPA_PPROF_PORT", None):
+                self.assertIsNone(recovery.capture_pprof(os.getpid(), 5000)[0]["ok"])
+
+    def test_cpa_restart_captures_pprof_first_and_capture_failure_does_not_block(self):
+        started = "1970-01-01T00:00:01+00:00"
+        containers = [{"Id": service, "Name": f"/ai-gateway-{service}-1", "Config": {
+            "Labels": {"com.docker.compose.project": "ai-gateway", "com.docker.compose.service": service},
+            "Env": []}, "State": {"Running": True, "Pid": 123, "StartedAt": started}}
+            for service in recovery.CHECKS]
+        order = []
+
+        def api(method, path, timeout=10):
+            if method == "POST":
+                order.append("restart")
+            return []
+
+        def capture(pid, now):
+            order.append("pprof")
+            raise TimeoutError("probe_deadline")
+
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as directory, \
+                mock.patch.object(recovery, "STATE_DIR", Path(directory)), \
+                mock.patch.object(recovery, "inspect", side_effect=lambda names: containers if len(names) > 1 else [containers[0]]), \
+                mock.patch.object(recovery, "namespace_probe", side_effect=lambda pid, request: {"ok": request["path"] != "/v1/models" or request["expected"] != 200}), \
+                mock.patch.object(recovery, "docker_api", side_effect=api), \
+                mock.patch.object(recovery, "capture_pprof", side_effect=capture), \
+                mock.patch.object(recovery.time, "time", return_value=1000), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            for _ in range(3):
+                recovery.run(True)
+        self.assertEqual(order, ["pprof", "restart"])
+        self.assertIn('"action": "restarted"', output.getvalue())
+        self.assertIn("TimeoutError", output.getvalue())
+
     def test_live_health_but_stuck_catalog_triggers_only_after_three_failures(self):
         Handler.catalog_delay = 0.2
         state = {}
