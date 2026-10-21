@@ -60,12 +60,12 @@ Implementation evidence for 2.1–2.5/2.7 is the isolated candidate `/var/tmp/ke
 ## 5. Review
 
 - [x] 5.1 Independent review of the keeper routing, credential and owner changes, the apisix routes and the Lua fallback against the specs. Verify there are no P1/P2 findings open, and that minor findings are recorded as follow-ups.
-- [ ] 5.2 Independent review of the extension change. Verify the same criteria.
+- [ ] 5.2 Independent review of the paired native/plugin continuation changes, including actual supported-host propagation. Verify there are no open P1/P2 findings in the agreed scope, and record the explicitly accepted unmarked-legacy limitation.
 
 ## Acceptance follow-up status — 2026-10-21
 
 - **#49 offline disk-full/slow-disk acceptance remains open.** A narrow real-ENOSPC cache-commit rollback passed; corrected full-disk wire fixture self-check and delayed-filesystem mounting remain blocked. The unthrottled control is not slow-disk evidence. See `verification.md` for preserved failed runs, source identity and limits.
-- **5.2 remains unchecked.** Operator selected paired native/plugin cross-socket memory and root-cause fixes, preserving recent features. Planning retry failed with HTTP 429 `model_cooldown`; the operator then selected task-scoped `gpt-6.1-sol` planning and read-only diagnosis. Both reports are now delivered. The paired design remains conditional on legacy/metadata/compaction choices and focused compatibility review; product edits have not started.
+- **5.2 remains unchecked.** Paired policy is now approved: minimal future ancestry fact, existing legacy behavior with disclosed residual risk, and existing summary-plus-retained-context rebase. Targeted review `044df86d` closed design gate B1 only. Two isolated `gpt-6.1-sol` implementation lanes (`5380d983`) are working under `/var/tmp/pi-continuation-p2-20261021-ulsoYs/CONTRACT.md`; no code/test acceptance claimed. Parent tasks #56/#57 cover components, #58 requires both durable handoffs, actual host/plugin propagation, protected checks, descendant/full replay and final review.
 - **#52 directory acceptance remains open.** Read-only diagnosis and parent offline evidence checks are complete, but not a repair. Both basic and original/catalog legs have slow examples; the dominant 404 cohort matches unauthenticated liveness probes. Remaining phase ownership and client ECONNRESET are unproven. Timing/equivalence or production changes require a separate implementation decision.
 - **6.5 remains unchecked.** Operator will restart all Pi processes; then use client-side transport labels per session. Mixed-client keeper `previous=false` aggregates cannot prove plugin improvement.
 
@@ -83,4 +83,4 @@ Implementation evidence for 2.1–2.5/2.7 is the isolated candidate `/var/tmp/ke
   - other container IDs are unchanged;
   - one real low-cost Responses turn on HTTP and one on WebSocket succeeds (only with operator approval for inference).
 - [ ] 6.4 Observe for 24 h and record selector and keeper 503 counts, the keeper `previous=false` ratio, and host swap and load in `verification.md`. Verify the comparison against the 0.2 baseline.
-- [ ] 6.5 Release the extension change and record its commit. Verify the `WS/full` share drops in keeper logs, measured as `ws previous=false` relative to total WebSocket turns.
+- [ ] 6.5 Release the paired change and record exact commits. After all participating Pi processes load the updated versions, verify that the `WS/full` share drops, measured using client-side `WS/full` versus `WS/continuation` labels per session. Keeper's mixed-client `previous=false` aggregate is context only, not attribution to this change.
