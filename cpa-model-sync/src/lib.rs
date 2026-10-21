@@ -296,11 +296,14 @@ fn inventory(
             request["proxy_url"] = json!(proxy);
         }
         let response = cpa.request("POST", "api-call", Some(&request), INVENTORY_LIMIT)?;
-        if !response["status_code"]
-            .as_u64()
-            .is_some_and(|s| (200..300).contains(&s))
-        {
-            return Err("upstream request failed");
+        let status = response["status_code"].as_u64();
+        if !status.is_some_and(|s| (200..300).contains(&s)) {
+            // Operators need the class, not the body: credential vs quota vs other.
+            return Err(match status {
+                Some(401 | 403) => "upstream rejected credentials",
+                Some(429) => "upstream rate limited",
+                _ => "upstream request failed",
+            });
         }
         let body = nonempty(&response["body"])?;
         total_bytes += body.len() as u64;

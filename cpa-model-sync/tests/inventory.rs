@@ -89,6 +89,16 @@ fn complete_inventory_and_filter_contracts() {
             expected: Err("upstream request failed"),
         },
         Case {
+            name: "rejected credentials", kind: "openai-compatibility",
+            pages: vec![json!({"status_code":401,"body":"denied"})],
+            include: vec![], exclude: vec![], expected: Err("upstream rejected credentials"),
+        },
+        Case {
+            name: "rate limited", kind: "codex-api-key",
+            pages: vec![json!({"status_code":429,"body":"slow down"})],
+            include: vec![], exclude: vec![], expected: Err("upstream rate limited"),
+        },
+        Case {
             name: "cursor cycle",
             kind: "claude-api-key",
             pages: vec![
