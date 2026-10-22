@@ -1,11 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"html/template"
 	"log/slog"
 	"net/http"
 	"os"
@@ -51,12 +49,12 @@ func main() {
 		os.Exit(1)
 	}
 	pool := newHTTPPool(cfg.HTTPConcurrency, cfg.OverallDeadline+5*time.Second)
-	pool.cache, err = newReadCache("", log)
+	pool.cache, err = newReadCache(env("CACHE_DIR", defaultCacheDir), log)
 	if err != nil {
 		log.Error("read cache initialization failed", "err", err)
 		os.Exit(1)
 	}
-	defer os.RemoveAll(pool.cache.dir)
+	defer pool.cache.close()
 	cpa := newCPAClient(cfg.CPABaseURL, mgmt, clientKey, pool, log)
 	aisix := newAISIXClient(cfg.AISIXModelsURL, cfg.AISIXToken, cfg.AISIXTimeout, pool)
 	snapshotCtx, stopSnapshots := context.WithCancel(context.Background())
@@ -217,6 +215,7 @@ type refreshResult struct {
 	done   chan struct{}
 	status int
 	body   []byte
+	stale  int32
 	at     time.Time
 }
 
@@ -230,7 +229,6 @@ type modelsHandler struct {
 
 	refreshMu sync.Mutex
 	refresh   *refreshResult
-	lastGood  atomic.Pointer[renderedModelsTable]
 }
 
 func newModelsHandler(cfg *Config, cpa *CPAClient, aisix *AISIXClient, pool *httpPool, log *slog.Logger, owners ...*routingSnapshotOwner) *modelsHandler {
@@ -250,11 +248,7 @@ func handleModels(cfg *Config, cpa *CPAClient, aisix *AISIXClient, pool *httpPoo
 
 func (h *modelsHandler) write(w http.ResponseWriter, table bool, status int, body []byte) {
 	if table {
-		renderedAt := time.Now()
-		status, html := renderModelsTable(status, body, renderedAt, tableNotice{})
-		if status == http.StatusOK {
-			h.lastGood.Store(&renderedModelsTable{body: append([]byte(nil), html...), at: renderedAt})
-		}
+		status, html := renderModelsTable(status, body, time.Now(), tableNotice{})
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(status)
 		_, _ = w.Write(html)
@@ -297,9 +291,12 @@ func (h *modelsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return true
 	}
 
+	// 共享构建与快照刷新不随客户端断开而取消（仍受各自期限约束）；
+	// 放弃等待的请求不应让成功响应无法写入缓存。
+	shared := context.WithoutCancel(r.Context())
 	wasCold := h.owner.current().generation == 0
 	if wasCold {
-		if err := h.owner.ensureInitialized(r.Context()); err != nil {
+		if err := h.owner.ensureInitialized(shared); err != nil {
 			h.log.Warn("routing snapshot initialization incomplete", "err", err)
 		}
 	}
@@ -309,7 +306,7 @@ func (h *modelsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.refreshOnMiss && !wasCold {
-		if err := h.owner.refresh(r.Context()); err != nil {
+		if err := h.owner.refresh(shared); err != nil {
 			h.log.Warn("routing snapshot request refresh incomplete", "err", err)
 		}
 		snapshot = h.owner.current()
@@ -324,7 +321,7 @@ func (h *modelsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		serve(f)
 		return
 	}
-	status, body := h.build(r, cv, snapshot, format)
+	status, body, _ := h.build(r.WithContext(shared), cv, snapshot, format)
 	f.status, f.body = status, body
 	close(f.done)
 	catalogFlights.Lock()
@@ -341,9 +338,17 @@ func (h *modelsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.write(w, table, status, body)
 }
 
-func (h *modelsHandler) build(r *http.Request, cv string, snapshot *routingSnapshot, format catalogFormat) (int, []byte) {
+// build 返回本次构建中复用旧输入响应的次数，供诊断页提示。
+func (h *modelsHandler) build(r *http.Request, cv string, snapshot *routingSnapshot, format catalogFormat) (int, []byte, int32) {
 	catalogBuildMu.Lock()
 	defer catalogBuildMu.Unlock()
+	var stale atomic.Int32
+	r = r.WithContext(withStaleReadCounter(r.Context(), &stale))
+	status, body := h.buildLocked(r, cv, snapshot, format)
+	return status, body, stale.Load()
+}
+
+func (h *modelsHandler) buildLocked(r *http.Request, cv string, snapshot *routingSnapshot, format catalogFormat) (int, []byte) {
 	status, body := buildCatalog(r, h.cfg, h.cpa, h.pool, h.log, cv, snapshot)
 	if status >= 200 && status < 300 && format != catalogTable && len(h.cfg.ExcludeModels) > 0 {
 		var manifest Manifest
@@ -377,14 +382,25 @@ func (h *modelsHandler) build(r *http.Request, cv string, snapshot *routingSnaps
 	return status, body
 }
 
-func (h *modelsHandler) forceRefresh(r *http.Request) (int, []byte) {
+// forceRefresh 绕过新鲜度重新读取；元数据失败仍回退到最后成功响应，
+// 并按当前权威快照重新合成，绝不重放旧表格。
+func (h *modelsHandler) forceRefresh(r *http.Request) (int, []byte, int32) {
 	ctx, cancel := context.WithTimeout(withReadCacheBypass(context.Background()), h.cfg.OverallDeadline+5*time.Second)
 	defer cancel()
-	if err := h.owner.forceRefresh(ctx); err != nil {
-		return errorJSON(http.StatusBadGateway, "forced_refresh_failed", err.Error())
+	refreshErr := h.owner.forceRefresh(ctx)
+	snapshot := h.owner.current()
+	if snapshot.cpaAvailability == sourceFailed || snapshot.cpaManifest == nil {
+		msg := "CPA native manifest unavailable"
+		if refreshErr != nil {
+			msg = refreshErr.Error()
+		}
+		status, body := errorJSON(http.StatusBadGateway, "forced_refresh_failed", msg)
+		return status, body, 0
 	}
-	clone := r.Clone(ctx)
-	return h.build(clone, tableInventoryClientVersion, h.owner.current(), catalogTable)
+	if refreshErr != nil {
+		h.log.Warn("forced refresh incomplete; rebuilding from current snapshot", "err", refreshErr)
+	}
+	return h.build(r.Clone(ctx), tableInventoryClientVersion, snapshot, catalogTable)
 }
 
 func (h *modelsHandler) handleForceRefresh(w http.ResponseWriter, r *http.Request) {
@@ -399,7 +415,7 @@ func (h *modelsHandler) handleForceRefresh(w http.ResponseWriter, r *http.Reques
 		f = &refreshResult{done: make(chan struct{})}
 		h.refresh = f
 		go func() {
-			f.status, f.body = h.forceRefresh(r)
+			f.status, f.body, f.stale = h.forceRefresh(r)
 			f.at = time.Now()
 			close(f.done)
 			h.refreshMu.Lock()
@@ -413,34 +429,19 @@ func (h *modelsHandler) handleForceRefresh(w http.ResponseWriter, r *http.Reques
 	case <-r.Context().Done():
 		return
 	}
-	attemptedAt := f.at
-	if f.status == http.StatusOK {
-		_, clean := renderModelsTable(f.status, f.body, attemptedAt, tableNotice{})
-		status, html := renderModelsTable(f.status, f.body, attemptedAt, tableNotice{Class: "success", Text: "刷新成功 · " + attemptedAt.UTC().Format(time.RFC3339)})
-		h.lastGood.Store(&renderedModelsTable{body: clean, at: attemptedAt})
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(status)
-		_, _ = w.Write(html)
+	attemptedAt := f.at.UTC().Format(time.RFC3339)
+	if f.status != http.StatusOK {
+		h.write(w, true, f.status, f.body)
 		return
 	}
-	if last := h.lastGood.Load(); last != nil {
-		warning := tableNotice{Class: "warning", Text: fmt.Sprintf("刷新失败 · %s · 显示最后可用表格（%s）", attemptedAt.UTC().Format(time.RFC3339), last.at.UTC().Format(time.RFC3339))}
-		html := injectTableNotice(last.body, warning)
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(html)
-		return
+	notice := tableNotice{Class: "success", Text: "刷新成功 · " + attemptedAt}
+	if f.stale > 0 {
+		notice = tableNotice{Class: "warning", Text: fmt.Sprintf("刷新完成 · %s · %d 个输入接口刷新失败，已使用其最后成功的响应", attemptedAt, f.stale)}
 	}
-	h.write(w, true, f.status, f.body)
-}
-
-func injectTableNotice(body []byte, notice tableNotice) []byte {
-	marker := []byte(`<div id="err"></div>`)
-	banner := []byte(fmt.Sprintf(`<div id="notice" class="%s">%s</div>`, template.HTMLEscapeString(notice.Class), template.HTMLEscapeString(notice.Text)))
-	if bytes.Contains(body, marker) {
-		return bytes.Replace(body, marker, append(banner, marker...), 1)
-	}
-	return body
+	status, html := renderModelsTable(f.status, f.body, f.at, notice)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = w.Write(html)
 }
 
 // buildCatalog 执行完整合成管线，返回 HTTP 状态与响应体（供单飞共享）。

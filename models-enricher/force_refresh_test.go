@@ -25,6 +25,12 @@ type forceRefreshFixture struct {
 	discoverCalls atomic.Int32
 	channelCalls  atomic.Int32
 	sourceCalls   atomic.Int32
+	sourceStatus  atomic.Int32
+	extraModel    atomic.Bool
+	blockSource   atomic.Bool
+	sourceEntered chan struct{}
+	releaseSource chan struct{}
+	pool          *httpPool
 	blockNative   atomic.Bool
 	nativeEntered chan struct{}
 	releaseNative chan struct{}
@@ -32,11 +38,22 @@ type forceRefreshFixture struct {
 
 func newForceRefreshFixture(t *testing.T) *forceRefreshFixture {
 	t.Helper()
-	f := &forceRefreshFixture{nativeEntered: make(chan struct{}, 1), releaseNative: make(chan struct{})}
+	f := &forceRefreshFixture{nativeEntered: make(chan struct{}, 1), releaseNative: make(chan struct{}), sourceEntered: make(chan struct{}, 1), releaseSource: make(chan struct{})}
 	f.version.Store(1)
 
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.sourceCalls.Add(1)
+		if r.URL.Path == "/api.json" && f.blockSource.Load() {
+			select {
+			case f.sourceEntered <- struct{}{}:
+			default:
+			}
+			<-f.releaseSource
+		}
+		if status := f.sourceStatus.Load(); status != 0 {
+			w.WriteHeader(int(status))
+			return
+		}
 		version := f.version.Load()
 		switch r.URL.Path {
 		case "/api.json":
@@ -69,10 +86,18 @@ func newForceRefreshFixture(t *testing.T) *forceRefreshFixture {
 				w.WriteHeader(int(status))
 				return
 			}
+			if f.extraModel.Load() {
+				fmt.Fprintf(w, `{"models":[{"slug":"p/m%d"},{"slug":"p/new"}]}`, version)
+				return
+			}
 			fmt.Fprintf(w, `{"models":[{"slug":"p/m%d"}]}`, version)
 		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/openai-compatibility":
 			f.discoverCalls.Add(1)
-			fmt.Fprintf(w, `{"openai-compatibility":[{"name":"P","prefix":"p","base-url":"https://provider.invalid/v1","api-key-entries":[{"auth-index":"p"}],"models":[{"name":"m%d"}]}]}`, version)
+			extra := ""
+			if f.extraModel.Load() {
+				extra = `,{"name":"new"}`
+			}
+			fmt.Fprintf(w, `{"openai-compatibility":[{"name":"P","prefix":"p","base-url":"https://provider.invalid/v1","api-key-entries":[{"auth-index":"p"}],"models":[{"name":"m%d"}%s]}]}`, version, extra)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v0/management/") && r.URL.Path != "/v0/management/auth-files" && r.URL.Path != "/v0/management/oauth-model-alias":
 			kind := strings.TrimPrefix(r.URL.Path, "/v0/management/")
 			fmt.Fprintf(w, `{"%s":[]}`, kind)
@@ -101,6 +126,7 @@ func newForceRefreshFixture(t *testing.T) *forceRefreshFixture {
 	t.Cleanup(aisix.Close)
 
 	pool := cachedTestPool(t)
+	f.pool = pool
 	cfg := &Config{
 		CPABaseURL: cpa.URL, HTTPConcurrency: 8,
 		ChannelTimeout: time.Second, OverallDeadline: 2 * time.Second,
@@ -150,10 +176,10 @@ func TestReadCacheForceRefreshDoesNotJoinOrdinaryFlight(t *testing.T) {
 	ordinaryDone := make(chan struct{})
 	go func() {
 		defer close(ordinaryDone)
-		_, _ = pool.cache.load(context.Background(), "same-key", ordinaryFetch)
+		_, _ = pool.cache.load(context.Background(), "same-key", cacheAuthority, ordinaryFetch)
 	}()
 	<-ordinaryEntered
-	body, err := pool.cache.load(withReadCacheBypass(context.Background()), "same-key", forcedFetch)
+	body, err := pool.cache.load(withReadCacheBypass(context.Background()), "same-key", cacheAuthority, forcedFetch)
 	if err != nil || string(body) != `{"source":"forced"}` || forcedCalls.Load() != 1 {
 		t.Fatalf("forced read joined ordinary flight: body=%s calls=%d err=%v", body, forcedCalls.Load(), err)
 	}
@@ -336,27 +362,33 @@ func TestModelsTableForceRefreshHTTPAcceptance(t *testing.T) {
 	f.blockNative.Store(false)
 	f.nativeStatus.Store(http.StatusBadGateway)
 	status, body = do(http.MethodPost)
-	if status != http.StatusOK || !strings.Contains(body, "刷新失败") || !strings.Contains(body, "p/m2") {
-		t.Fatalf("HTTP last-good fallback: status=%d body=%.300s", status, body)
+	if status < 400 || strings.Contains(body, "<table") {
+		t.Fatalf("missing CPA authority replayed a saved table: status=%d body=%.300s", status, body)
 	}
 	t.Logf("GET=%d fresh_POST=200 concurrent_POST=200/200 failed_POST=%d native_calls=%d", http.StatusOK, status, f.nativeCalls.Load())
 }
 
-func TestModelsTableForceRefreshLastGoodFallback(t *testing.T) {
+// 强制刷新时元数据源失败：按当前CPA成员重新合成（新模型可见），
+// 匹配旧模型的元数据来自最后成功响应，并提示使用了旧响应；不重放旧表格。
+func TestModelsTableForceRefreshRecomposesFromCachedInputs(t *testing.T) {
 	f := newForceRefreshFixture(t)
 	good := requestForceRefresh(f.handler, http.MethodGet, "/models-table")
-	if good.Code != http.StatusOK || !strings.Contains(good.Body.String(), "p/m1") {
-		t.Fatal("failed to establish last-good table")
+	if good.Code != http.StatusOK || !strings.Contains(good.Body.String(), "source-v1") {
+		t.Fatal("failed to warm metadata")
 	}
-	f.nativeStatus.Store(http.StatusBadGateway)
-	failed := requestForceRefresh(f.handler, http.MethodPost, "/models-table/refresh")
-	if failed.Code != http.StatusOK || !strings.Contains(failed.Body.String(), "刷新失败") || !strings.Contains(failed.Body.String(), "p/m1") || strings.Contains(failed.Body.String(), "刷新成功") {
-		t.Fatalf("failed refresh did not preserve last-good table: HTTP %d %.500s", failed.Code, failed.Body.String())
+	f.sourceStatus.Store(http.StatusBadGateway)
+	f.extraModel.Store(true)
+	refreshed := requestForceRefresh(f.handler, http.MethodPost, "/models-table/refresh")
+	body := refreshed.Body.String()
+	if refreshed.Code != http.StatusOK || !strings.Contains(body, "p/new") || !strings.Contains(body, "source-v1") || !strings.Contains(body, "最后成功的响应") || strings.Contains(body, "刷新成功") {
+		t.Fatalf("forced refresh did not recompose from cached inputs: HTTP %d %.600s", refreshed.Code, body)
 	}
+}
 
+func TestModelsTableForceRefreshWithoutAuthority(t *testing.T) {
 	fresh := newForceRefreshFixture(t)
 	fresh.nativeStatus.Store(http.StatusBadGateway)
-	failed = requestForceRefresh(fresh.handler, http.MethodPost, "/models-table/refresh")
+	failed := requestForceRefresh(fresh.handler, http.MethodPost, "/models-table/refresh")
 	if failed.Code < 400 || strings.Contains(failed.Body.String(), "<table") {
 		t.Fatalf("failure without last-good table = HTTP %d %.300s", failed.Code, failed.Body.String())
 	}

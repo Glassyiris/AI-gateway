@@ -61,11 +61,6 @@ type modelsTableView struct {
 	Notice  tableNotice
 }
 
-type renderedModelsTable struct {
-	body []byte
-	at   time.Time
-}
-
 // 输入是管线已编码的JSON，数字通过decodeJSON保留为json.Number。
 func modelTableCell(model map[string]any, key string) tableCell {
 	v, exists := model[key]
