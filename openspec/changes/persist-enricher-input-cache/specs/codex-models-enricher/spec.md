@@ -2,7 +2,7 @@
 
 ### Requirement: Metadata fallback with cached data sources
 
-When a model's metadata fields are missing from the channel response, the sidecar SHALL look them up from the configured models.dev and/or modelparams.dev sources. Validated successful enrichment inputs, including read-only channel metadata responses and configured per-model metadata lookups, SHALL be cached as API responses rather than as final model catalogs. Ordinary reads SHALL reuse fresh responses for five minutes; expiry SHALL make an input eligible for refresh without deleting its last successful response or imposing a maximum fallback age. After a failed metadata refresh, the sidecar SHALL reuse that request's last successful cached response when present and SHALL NOT replace or invalidate it because the refresh failed. Metadata failures include timeouts, connection failures, non-success HTTP statuses including 401/403, and invalid response bodies. Actual caller cancellation SHALL still terminate the caller's operation. Without a usable cached input, the sidecar SHALL retain its existing affected-channel baseline or error behavior rather than fabricate metadata. These rules SHALL NOT relax membership, authorization, or routing authority.
+When a model's metadata fields are missing from the channel response, the sidecar SHALL look them up from the configured models.dev and/or modelparams.dev sources. Validated successful enrichment inputs, including read-only channel metadata responses and configured per-model metadata lookups, SHALL be cached as API responses rather than as final model catalogs. Ordinary reads SHALL reuse fresh responses for five minutes; expiry SHALL make an input eligible for refresh without deleting its last successful response or imposing a maximum fallback age. After a failed metadata refresh, the sidecar SHALL reuse that request's last successful cached response when present and SHALL NOT replace or invalidate it because the refresh failed. Metadata failures include timeouts, connection failures, non-success HTTP statuses including 401/403, and invalid response bodies. A client disconnecting from a catalog or table request SHALL only stop that client's wait; the shared build and snapshot refresh SHALL continue within their existing deadlines and publish successful inputs to the cache. An enrichment stage whose deadline is already exhausted SHALL still use the retained last successful input. Without a usable cached input, the sidecar SHALL retain its existing affected-channel baseline or error behavior rather than fabricate metadata. These rules SHALL NOT relax membership, authorization, or routing authority.
 
 #### Scenario: Missing max_tokens filled
 
@@ -35,11 +35,17 @@ When a model's metadata fields are missing from the channel response, the sideca
 - **THEN** the sidecar replaces the previous response with the valid empty response
 - **AND** it does not resurrect old metadata merely because the new response is empty
 
-#### Scenario: Caller cancellation is not hidden by stale fallback
+#### Scenario: Client disconnect does not abort the shared build
 
-- **WHEN** the caller cancels an enrichment operation
-- **THEN** that operation terminates according to the existing cancellation contract rather than reporting a successful refresh from cached data
-- **AND** cancellation does not delete the last successful cached metadata input
+- **WHEN** a client disconnects while a shared catalog or table build is fetching metadata
+- **THEN** that client stops waiting, while the build continues within its existing deadline and stores successful metadata responses
+- **AND** a later request uses the stored metadata without another successful upstream fetch
+
+#### Scenario: Cancellation does not delete cached metadata
+
+- **WHEN** an individual metadata read is cancelled
+- **THEN** that read returns cancellation rather than reporting a successful refresh
+- **AND** the last successful cached metadata input remains stored
 
 ### Requirement: Snapshot lifecycle is initialized and refreshed independently of catalog traffic
 
@@ -107,7 +113,7 @@ The diagnostic force-refresh action SHALL be the sole exception to request-indep
 
 ### Requirement: Enrichment inputs survive sidecar restart on a dedicated volume
 
-The sidecar SHALL retain its validated successful enrichment API responses on a dedicated Docker data volume mounted as its cache path. Normal process restart and container recreation with the same volume SHALL preserve cached payloads, last-successful-refresh times, capacity accounting, and FIFO order. Cache age alone SHALL NOT remove persisted inputs, and startup SHALL NOT pretend recovered stale data was newly fetched. Persistent cache contents SHALL consist of API inputs and their cache metadata, not assembled models catalogs, rendered tables, or authorization snapshots. Cache request identities SHALL isolate method, destination, relevant authentication and headers, and any inner read request body; stored keys, logs, and diagnostics SHALL NOT expose credentials.
+The sidecar SHALL retain its validated successful enrichment API responses on a dedicated Docker data volume mounted as its cache path. Normal process restart and container recreation with the same volume SHALL preserve cached payloads, last-successful-refresh times, capacity accounting, and FIFO order. Cache age alone SHALL NOT remove persisted inputs, and startup SHALL NOT pretend recovered stale data was newly fetched. Persistent cache contents SHALL consist of metadata API inputs and their cache metadata, not assembled models catalogs, rendered tables, authority reads (native inventory, management discovery/identity, AISIX membership), or authorization snapshots; authority reads SHALL remain process-local. Cache request identities SHALL isolate method, destination, relevant authentication and headers, and any inner read request body; stored keys, logs, and diagnostics SHALL NOT expose credentials.
 
 #### Scenario: Restart during an external metadata outage
 

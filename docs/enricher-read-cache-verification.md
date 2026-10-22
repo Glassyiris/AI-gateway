@@ -1,5 +1,7 @@
 # Enricher read cache and channel fallback: local verification
 
+> Superseded for cache retention by OpenSpec change `persist-enricher-input-cache` (2026-10-22): metadata inputs now persist on the `models-enricher-cache` volume with a 100 MB payload FIFO budget, and authority reads stay in memory. See README "Reads are split by purpose". The record below describes the earlier temporary-directory cache.
+
 Local verification record from 2026-09-07, before deployment. The configuration/activation follow-up below is separate from the earlier HTTP/resource fixture. The subsequent manual production deployment and actual checks are recorded in [the deployment report](enricher-read-cache-deployment-2026-09-07.md); Rust was not changed.
 
 ## Behavior checked
