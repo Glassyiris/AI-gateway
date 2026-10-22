@@ -277,7 +277,6 @@ else
   rendered_format=yaml
 fi
 
-python3 scripts/test-standard-cache-topology.py
 python3 - "$rendered" "$rendered_format" <<'PY'
 import ipaddress
 import json
@@ -704,6 +703,9 @@ python3 scripts/test-standard-cache-topology.py
 
 # Build local components and parse their native configuration. These are syntax
 # gates, not snapshots of ports, service counts, or application policy values.
+# A digest selects a published image; it cannot be an output tag for a local build.
+AI_SSE_KEEPALIVE_PROXY_IMAGE=ai-gateway-ai-sse-keepalive-proxy:validate \
+OPENAI_API_CACHE_KEEPER_IMAGE=ai-gateway-openai-api-cache-keeper:validate \
 BUILDAH_FORMAT=docker "${COMPOSE[@]}" "${compose_args[@]}" --env-file "$env_file" build ai-sse-keepalive-proxy openai-api-cache-keeper >/dev/null
 egress_image=$(value_from_env EGRESS_PROXY_IMAGE)
 [ -n "$egress_image" ] || egress_image=ai-gateway-squid:6.13-2-deb13u3-r1

@@ -95,6 +95,9 @@ class StandardCacheTopology(unittest.TestCase):
         keepalive = section(self.compose, "  ai-sse-keepalive-proxy:\n")
         for value in ("mem_limit: 128m", "cpus: 0.5", "pids_limit: 128", "GOMEMLIMIT: ${AI_SSE_KEEPALIVE_PROXY_GOMEMLIMIT:-96MiB}", "MAX_INSPECT_BODY_BYTES: ${AI_SSE_KEEPALIVE_PROXY_MAX_INSPECT_BODY_BYTES:-8388608}"):
             self.assertIn(value, keepalive)
+        script = (ROOT / "scripts/validate.sh").read_text()
+        self.assertIn("AI_SSE_KEEPALIVE_PROXY_IMAGE=ai-gateway-ai-sse-keepalive-proxy:validate \\\nOPENAI_API_CACHE_KEEPER_IMAGE=ai-gateway-openai-api-cache-keeper:validate \\\nBUILDAH_FORMAT=docker", script)
+        self.assertEqual(script.count("python3 scripts/test-standard-cache-topology.py\n"), 1)
 
     def test_disposable_volumes_have_exact_owners_targets_and_cache_dir(self):
         script = (ROOT / "scripts/validate.sh").read_text()
