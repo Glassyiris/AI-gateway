@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"reflect"
@@ -343,7 +344,28 @@ func sourceGet(ctx context.Context, pool *httpPool, url string) ([]byte, error) 
 		return nil, err
 	}
 	req.Header.Set("User-Agent", browserUA)
-	return pool.readJSON(req, 16<<20, cacheMetadata, nil)
+	return pool.readJSON(req, 16<<20, cacheMetadata, validateSourceShape(url))
+}
+
+// validateSourceShape 在发布缓存前确认批量源的顶层形状；形状不对的响应不替换最后成功值。
+// 空对象或空 models 数组是合法的空响应。
+func validateSourceShape(url string) func([]byte) error {
+	return func(raw []byte) error {
+		if url == modelparamsURL {
+			var envelope struct {
+				Models *[]map[string]any `json:"models"`
+			}
+			if err := decodeJSON(raw, &envelope); err != nil {
+				return err
+			}
+			if envelope.Models == nil {
+				return errors.New("modelparams response lacks models array")
+			}
+			return nil
+		}
+		var object map[string]map[string]any
+		return decodeJSON(raw, &object)
+	}
 }
 
 // indexModelsDev：api.json 天然按 provider 分命名空间；

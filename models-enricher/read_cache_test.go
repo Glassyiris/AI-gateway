@@ -177,7 +177,7 @@ func TestAPICallCacheChecksInnerStatusAndReadOnlyMethods(t *testing.T) {
 	pool := cachedTestPool(t)
 	cpa := newCPAClient(server.URL, "management-secret", "client-secret", pool, pool.cache.log)
 	call := func(method, endpoint string) error {
-		_, _, err := cpa.APICall(context.Background(), Channel{AuthIndex: "one"}, method, endpoint, nil, []byte(`{"name":"model"}`))
+		_, _, err := cpa.APICall(context.Background(), Channel{AuthIndex: "one", Type: "openai-compatibility"}, method, endpoint, nil, []byte(`{"name":"model"}`))
 		return err
 	}
 	status.Store(403)

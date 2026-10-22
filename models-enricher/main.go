@@ -96,7 +96,9 @@ func main() {
 // 0=禁用；生产在main()启用。旧generation的结果不会被新请求命中。
 var catalogCacheTTL atomic.Int64
 var catalogCacheMaxBytes atomic.Int64
-var catalogBuildMu sync.Mutex
+
+// catalogBuildGate 串行化完整构建；等待也受构建期限约束，脱离客户端的构建不会无限排队。
+var catalogBuildGate = make(chan struct{}, 1)
 
 const catalogCacheMaxEntries = 24
 
@@ -321,7 +323,9 @@ func (h *modelsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		serve(f)
 		return
 	}
-	status, body, _ := h.build(r.WithContext(shared), cv, snapshot, format)
+	buildCtx, cancelBuild := context.WithTimeout(shared, h.cfg.OverallDeadline+5*time.Second)
+	status, body, _ := h.build(r.WithContext(buildCtx), cv, snapshot, format)
+	cancelBuild()
 	f.status, f.body = status, body
 	close(f.done)
 	catalogFlights.Lock()
@@ -339,9 +343,15 @@ func (h *modelsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // build 返回本次构建中复用旧输入响应的次数，供诊断页提示。
+// 调用方的 context 必须带期限；排队超时返回 503。
 func (h *modelsHandler) build(r *http.Request, cv string, snapshot *routingSnapshot, format catalogFormat) (int, []byte, int32) {
-	catalogBuildMu.Lock()
-	defer catalogBuildMu.Unlock()
+	select {
+	case catalogBuildGate <- struct{}{}:
+	case <-r.Context().Done():
+		status, body := errorJSON(http.StatusServiceUnavailable, "catalog_build_queue_timeout", "catalog build queue wait exceeded the build deadline")
+		return status, body, 0
+	}
+	defer func() { <-catalogBuildGate }()
 	var stale atomic.Int32
 	r = r.WithContext(withStaleReadCounter(r.Context(), &stale))
 	status, body := h.buildLocked(r, cv, snapshot, format)

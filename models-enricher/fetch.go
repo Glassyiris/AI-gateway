@@ -67,7 +67,10 @@ func fetchOne(ctx context.Context, cpa *CPAClient, cfg *Config, ch Channel, clie
 	if override := cfg.Channels[ch.Prefix].Path; override != "" {
 		path = override
 	}
-	body, _, err := cpa.APICall(ctx, ch, "GET", joinURL(ch.BaseURL, path), ad.auth, nil)
+	body, _, err := cpa.apiCall(ctx, ch, "GET", joinURL(ch.BaseURL, path), ad.auth, nil, func(inner []byte) error {
+		_, err := ad.parse(inner)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}

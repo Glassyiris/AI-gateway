@@ -44,7 +44,10 @@ func fetchOllamaForChannel(ctx context.Context, cpa *CPAClient, cfg *Config, ch 
 		go func(id string, names []string) {
 			defer wg.Done()
 			body, _ := json.Marshal(map[string]string{"model": id})
-			response, _, err := cpa.APICall(ctx, ch, "POST", url, auth, body)
+			response, _, err := cpa.apiCall(ctx, ch, "POST", url, auth, body, func(inner []byte) error {
+				_, err := parseOllamaMetadata(inner)
+				return err
+			})
 			var hit sourceHit
 			if err == nil {
 				hit, err = parseOllamaMetadata(response)

@@ -132,16 +132,17 @@ func (m *memCache) put(key string, body []byte, now time.Time) error {
 	}
 	old, exists := m.entries[key]
 	m.bytes -= int64(len(old.body))
-	for len(m.order) > 0 && m.bytes+size > authorityCacheBudget {
-		victim := m.order[0]
-		if victim == key {
-			m.order = append(m.order[1:], victim)
+	// 淘汰最早入场的其他条目；被替换的键保留原位置。
+	kept := m.order[:0]
+	for _, k := range m.order {
+		if k != key && m.bytes+size > authorityCacheBudget {
+			m.bytes -= int64(len(m.entries[k].body))
+			delete(m.entries, k)
 			continue
 		}
-		m.order = m.order[1:]
-		m.bytes -= int64(len(m.entries[victim].body))
-		delete(m.entries, victim)
+		kept = append(kept, k)
 	}
+	m.order = kept
 	if !exists {
 		m.order = append(m.order, key)
 	}
@@ -368,16 +369,18 @@ func (c *readCache) load(ctx context.Context, key string, policy cachePolicy, fe
 		}
 		return nil, err
 	}
-	if !bypass {
-		if body, stored, ok := c.lookup(policy, key); ok && c.clock().Sub(stored) < readCacheTTL {
-			return body, nil
-		}
-	}
 	flightKey := key
 	if bypass {
 		flightKey += ":force"
 	}
+	// 新鲜度检查与认领 flight 在同一锁内，避免刚提交的新结果后又发起重复刷新。
 	c.mu.Lock()
+	if !bypass {
+		if body, stored, ok := c.lookup(policy, key); ok && c.clock().Sub(stored) < readCacheTTL {
+			c.mu.Unlock()
+			return body, nil
+		}
+	}
 	if f := c.flights[flightKey]; f != nil {
 		c.mu.Unlock()
 		select {

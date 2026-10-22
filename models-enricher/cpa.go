@@ -103,6 +103,11 @@ func (c *CPAClient) NativeManifest(ctx context.Context) (*Manifest, error) {
 // 依 auth_index 替换）。data 为非空时作为上游请求 body 原样携带（CPA api-call 的
 // data 字段），调用方需自设 header Content-Type。
 func (c *CPAClient) APICall(ctx context.Context, ch Channel, method, absURL string, header map[string]string, data []byte) ([]byte, int, error) {
+	return c.apiCall(ctx, ch, method, absURL, header, data, nil)
+}
+
+// apiCall：validate 在发布缓存前校验内层响应形状，坏响应不会覆盖最后成功值。
+func (c *CPAClient) apiCall(ctx context.Context, ch Channel, method, absURL string, header map[string]string, data []byte, validate func([]byte) error) ([]byte, int, error) {
 	payload := map[string]any{
 		"method": method,
 		"url":    absURL,
@@ -124,15 +129,24 @@ func (c *CPAClient) APICall(ctx context.Context, ch Channel, method, absURL stri
 	}
 	req.Header.Set("Authorization", "Bearer "+c.mgmtKey)
 	req.Header.Set("Content-Type", "application/json")
-	// 外层POST只是CPA转发封装；内层GET（渠道模型列表）与Ollama只读/api/show是元数据输入，
-	// 成员与授权仍由CPA当前快照决定。其他方法不缓存。
+	// 外层POST只是CPA转发封装；只缓存内层GET或Ollama只读/api/show。
+	// 成员由CPA快照决定的渠道列表与/api/show只是元数据，可无限期回退；
+	// 自身列表决定成员的渠道（gemini/interactions）保持权威策略。
 	endpoint, _ := url.Parse(absURL)
 	policy := cacheNone
-	if method == http.MethodGet || (method == http.MethodPost && endpoint != nil && endpoint.Path == "/api/show") {
+	switch {
+	case method == http.MethodPost && endpoint != nil && endpoint.Path == "/api/show":
 		policy = cacheMetadata
+	case method == http.MethodGet && syncManagedKind(ch.Type):
+		policy = cacheMetadata
+	case method == http.MethodGet:
+		policy = cacheAuthority
 	}
 	body, err := c.pool.readJSON(req, 64<<20, policy, func(body []byte) error {
-		_, _, err := parseAPIRead(body)
+		inner, _, err := parseAPIRead(body)
+		if err == nil && validate != nil {
+			err = validate(inner)
+		}
 		return err
 	})
 	if err != nil {
