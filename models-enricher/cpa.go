@@ -89,7 +89,7 @@ func (c *CPAClient) NativeManifest(ctx context.Context) (*Manifest, error) {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.clientKey)
-	body, err := c.pool.readJSON(req, 64<<20, true, func(body []byte) error {
+	body, err := c.pool.readJSON(req, 64<<20, cacheAuthority, func(body []byte) error {
 		_, err := decodeCPANativeManifest(body)
 		return err
 	})
@@ -124,10 +124,14 @@ func (c *CPAClient) APICall(ctx context.Context, ch Channel, method, absURL stri
 	}
 	req.Header.Set("Authorization", "Bearer "+c.mgmtKey)
 	req.Header.Set("Content-Type", "application/json")
-	// 外层POST只是CPA转发封装；只缓存内层GET或Ollama的只读/api/show。
+	// 外层POST只是CPA转发封装；内层GET（渠道模型列表）与Ollama只读/api/show是元数据输入，
+	// 成员与授权仍由CPA当前快照决定。其他方法不缓存。
 	endpoint, _ := url.Parse(absURL)
-	cacheable := method == http.MethodGet || (method == http.MethodPost && endpoint != nil && endpoint.Path == "/api/show")
-	body, err := c.pool.readJSON(req, 64<<20, cacheable, func(body []byte) error {
+	policy := cacheNone
+	if method == http.MethodGet || (method == http.MethodPost && endpoint != nil && endpoint.Path == "/api/show") {
+		policy = cacheMetadata
+	}
+	body, err := c.pool.readJSON(req, 64<<20, policy, func(body []byte) error {
 		_, _, err := parseAPIRead(body)
 		return err
 	})
@@ -184,7 +188,7 @@ func (c *CPAClient) listKind(ctx context.Context, src channelSource) ([]Channel,
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.mgmtKey)
-	body, err := c.pool.readJSON(req, 8<<20, true, func(body []byte) error {
+	body, err := c.pool.readJSON(req, 8<<20, cacheAuthority, func(body []byte) error {
 		_, err := parseChannels(src.typ, src.wrapper, body)
 		if errors.Is(err, errIncompleteDiscovery) {
 			return nil // 响应可用但覆盖不全；返回时仍携带不完整信号。

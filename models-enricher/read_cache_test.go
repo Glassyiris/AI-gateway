@@ -43,7 +43,7 @@ func TestReadCacheFreshnessStaleAndDenied(t *testing.T) {
 	pool.cache.clock = func() time.Time { return now }
 	get := func() ([]byte, error) {
 		r, _ := http.NewRequest(http.MethodGet, server.URL, nil)
-		return pool.readJSON(r, 1024, true, nil)
+		return pool.readJSON(r, 1024, cacheAuthority, nil)
 	}
 	original, err := get()
 	if err != nil {
@@ -76,13 +76,21 @@ func TestReadCacheFreshnessStaleAndDenied(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := calls.Load()
-	// 新进程不读取旧目录，即使同一个父目录仍存在。
-	pool.cache, err = newReadCache(filepath.Dir(pool.cache.dir), pool.cache.log)
+	// 权威读取只在进程内存：重启后不恢复，必须重新读取。
+	dir, log := pool.cache.dir, pool.cache.log
+	if err := pool.cache.close(); err != nil {
+		t.Fatal(err)
+	}
+	pool.cache, err = newReadCache(dir, log)
 	if err != nil {
 		t.Fatal(err)
 	}
+	pool.cache.clock = func() time.Time { return now }
 	if _, err := get(); err != nil || calls.Load() != before+1 {
-		t.Fatal("restart reused old cache")
+		t.Fatal("authority read restored from disk after restart")
+	}
+	if keys, _ := cacheKeys(t, pool.cache); len(keys) != 0 {
+		t.Fatalf("authority read persisted: %v", keys)
 	}
 }
 
@@ -102,18 +110,18 @@ func TestReadCacheIdentityAndPrivateFiles(t *testing.T) {
 			t.Fatalf("identity collision: %v", err)
 		}
 		keys[key] = true
-		_, err = pool.cache.load(context.Background(), key, func() ([]byte, error) { return []byte(`{}`), nil })
+		_, err = pool.cache.load(context.Background(), key, cacheMetadata, func() ([]byte, error) { return []byte(`{}`), nil })
 		if err != nil {
 			t.Fatal(err)
 		}
-		info, err := os.Stat(pool.cache.path(key))
-		if err != nil || info.Mode().Perm() != 0600 {
-			t.Fatal("cache file is not private")
-		}
 	}
-	info, _ := os.Stat(pool.cache.dir)
-	if info.Mode().Perm() != 0700 {
-		t.Fatal("cache directory is not private")
+	info, err := os.Stat(filepath.Join(pool.cache.dir, "inputs.db"))
+	if err != nil || info.Mode().Perm() != 0600 {
+		t.Fatal("cache database is not private")
+	}
+	raw, err := os.ReadFile(filepath.Join(pool.cache.dir, "inputs.db"))
+	if err != nil || bytes.Contains(raw, []byte("secret-a")) {
+		t.Fatal("credential persisted in cache database")
 	}
 }
 
@@ -130,18 +138,18 @@ func TestReadCacheCoalescesAndHonorsCancellation(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() { defer wg.Done(); _, _ = pool.cache.load(context.Background(), "key", fetch) }()
+	go func() { defer wg.Done(); _, _ = pool.cache.load(context.Background(), "key", cacheAuthority, fetch) }()
 	<-entered
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := pool.cache.load(ctx, "key", fetch); !errors.Is(err, context.Canceled) {
+	if _, err := pool.cache.load(ctx, "key", cacheAuthority, fetch); !errors.Is(err, context.Canceled) {
 		t.Fatal("cancellation ignored")
 	}
 	for range 12 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := pool.cache.load(context.Background(), "key", fetch); err != nil {
+			if _, err := pool.cache.load(context.Background(), "key", cacheAuthority, fetch); err != nil {
 				t.Error(err)
 			}
 		}()
@@ -172,31 +180,38 @@ func TestAPICallCacheChecksInnerStatusAndReadOnlyMethods(t *testing.T) {
 		_, _, err := cpa.APICall(context.Background(), Channel{AuthIndex: "one"}, method, endpoint, nil, []byte(`{"name":"model"}`))
 		return err
 	}
+	status.Store(403)
+	if err := call("GET", "https://upstream/cold"); err == nil {
+		t.Fatal("inner 403 treated as success")
+	}
+	if err := call("GET", "https://upstream/cold"); err == nil || calls.Load() != 2 {
+		t.Fatal("inner failure cached")
+	}
+	status.Store(200)
 	if err := call("GET", "https://upstream/models"); err != nil {
 		t.Fatal(err)
 	}
-	if err := call("GET", "https://upstream/models"); err != nil || calls.Load() != 1 {
+	if err := call("GET", "https://upstream/models"); err != nil || calls.Load() != 3 {
 		t.Fatal("api-call read not cached")
 	}
+	// 渠道模型列表是元数据输入：过期后内层403复用最后成功响应。
 	pool.cache.clock = func() time.Time { return time.Now().Add(time.Hour) }
 	status.Store(403)
-	if err := call("GET", "https://upstream/models"); err == nil {
-		t.Fatal("inner 403 treated as success")
+	if err := call("GET", "https://upstream/models"); err != nil || calls.Load() != 4 {
+		t.Fatalf("metadata api-call lost last success after inner 403: %v", err)
 	}
-	if err := call("GET", "https://upstream/models"); err == nil || calls.Load() != 3 {
-		t.Fatal("inner failure cached")
-	}
+	pool.cache.clock = time.Now
 	status.Store(200)
 	if err := call("POST", "https://upstream/api/show"); err != nil {
 		t.Fatal(err)
 	}
-	if err := call("POST", "https://upstream/api/show"); err != nil || calls.Load() != 4 {
+	if err := call("POST", "https://upstream/api/show"); err != nil || calls.Load() != 5 {
 		t.Fatal("read-only POST not cached")
 	}
 	if err := call("POST", "https://upstream/change"); err != nil {
 		t.Fatal(err)
 	}
-	if err := call("POST", "https://upstream/change"); err != nil || calls.Load() != 6 {
+	if err := call("POST", "https://upstream/change"); err != nil || calls.Load() != 7 {
 		t.Fatal("write POST cached")
 	}
 }

@@ -343,7 +343,7 @@ func sourceGet(ctx context.Context, pool *httpPool, url string) ([]byte, error) 
 		return nil, err
 	}
 	req.Header.Set("User-Agent", browserUA)
-	return pool.readJSON(req, 16<<20, true, nil)
+	return pool.readJSON(req, 16<<20, cacheMetadata, nil)
 }
 
 // indexModelsDev：api.json 天然按 provider 分命名空间；

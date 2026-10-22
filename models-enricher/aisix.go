@@ -79,7 +79,7 @@ func (c *AISIXClient) FetchModelIDs(ctx context.Context) ([]string, error) {
 	}
 	req.Header.Set("User-Agent", browserUA)
 
-	body, err := c.pool.readJSON(req, 16<<20, true, validateAISIXModelsResponse)
+	body, err := c.pool.readJSON(req, 16<<20, cacheAuthority, validateAISIXModelsResponse)
 	if err != nil {
 		return nil, err
 	}

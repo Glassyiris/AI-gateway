@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -498,11 +497,11 @@ func TestRoutingSnapshotSourceAvailabilityFollowsReadCachePolicy(t *testing.T) {
 	t.Cleanup(cpa.Close)
 
 	pool := newHTTPPool(4, time.Second)
-	cache, err := newReadCache("", testLog())
+	cache, err := newReadCache(t.TempDir(), testLog())
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(cache.dir) })
+	t.Cleanup(func() { _ = cache.close() })
 	pool.cache = cache
 	var offset atomic.Int64
 	cache.clock = func() time.Time { return time.Now().Add(time.Duration(offset.Load())) }

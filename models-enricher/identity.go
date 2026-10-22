@@ -201,7 +201,7 @@ func (c *CPAClient) identityRead(ctx context.Context, path, field string, out an
 		}
 		return nil
 	}
-	body, err := c.pool.readJSON(req, 8<<20, true, decode)
+	body, err := c.pool.readJSON(req, 8<<20, cacheAuthority, decode)
 	if err != nil {
 		return err
 	}

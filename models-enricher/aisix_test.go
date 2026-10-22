@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -188,11 +187,11 @@ func TestAISIXValidEmptyListOverwritesCache(t *testing.T) {
 	}
 
 	pool := newHTTPPool(8, 5*time.Second)
-	cache, err := newReadCache("", testLog())
+	cache, err := newReadCache(t.TempDir(), testLog())
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.RemoveAll(cache.dir) })
+	t.Cleanup(func() { _ = cache.close() })
 	pool.cache = cache
 
 	handler := testAISIXHandler(cfg, cpaServer, pool)
@@ -264,11 +263,11 @@ func TestAISIXMalformedBodyInvalidatesCache(t *testing.T) {
 	}
 
 	pool := newHTTPPool(8, 5*time.Second)
-	cache, err := newReadCache("", testLog())
+	cache, err := newReadCache(t.TempDir(), testLog())
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.RemoveAll(cache.dir) })
+	t.Cleanup(func() { _ = cache.close() })
 	pool.cache = cache
 
 	handler := testAISIXHandler(cfg, cpaServer, pool)
@@ -335,11 +334,11 @@ func TestAISIXAuthFailureInvalidatesCache(t *testing.T) {
 	}
 
 	pool := newHTTPPool(8, 5*time.Second)
-	cache, err := newReadCache("", testLog())
+	cache, err := newReadCache(t.TempDir(), testLog())
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.RemoveAll(cache.dir) })
+	t.Cleanup(func() { _ = cache.close() })
 	pool.cache = cache
 
 	handler := testAISIXHandler(cfg, cpaServer, pool)
@@ -404,11 +403,11 @@ func TestAISIXTimeoutPermitsStaleCache(t *testing.T) {
 	}
 
 	pool := newHTTPPool(8, 5*time.Second)
-	cache, err := newReadCache("", testLog())
+	cache, err := newReadCache(t.TempDir(), testLog())
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.RemoveAll(cache.dir) })
+	t.Cleanup(func() { _ = cache.close() })
 	pool.cache = cache
 
 	handler := testAISIXHandler(cfg, cpaServer, pool)
