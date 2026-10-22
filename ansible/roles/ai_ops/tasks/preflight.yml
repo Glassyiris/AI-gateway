@@ -2,18 +2,27 @@
 # Shared preflight: compose provider detection, connectivity, deploy root, state dir.
 # Variables come from this role's defaults/main.yml; override in inventory.
 
-- name: Reject legacy inner-keeper deployment tags before any production writes
+- name: Reject unsafe operation selection before any production writes
+  vars:
+    _cache_tags: [deploy-standard-cache-path, restart-openai-api-cache-keeper, rollback-standard-cache-path]
   ansible.builtin.assert:
     that:
       - ansible_run_tags | intersect(['deploy-response-keeper', 'deploy-responses-path', 'restart-response-keeper']) | length == 0
+      - "'all' not in ansible_run_tags"
+      - >-
+        ansible_run_tags | intersect(_cache_tags) | length == 0 or
+        (ansible_run_tags | difference(_cache_tags + ['always']) | length == 0 and
+         ansible_run_tags | intersect(_cache_tags) | length == 1 and
+         ai_ops_runtime in ['', 'docker'] and ai_ops_compose_cmd in ['', 'docker compose'])
     fail_msg: >-
-      These tags deploy the retired inner response-keeper topology.
-      Use a scoped standard-cache deployment with fresh live-config snapshots;
-      never apply the full development Compose to production.
+      Select one explicit supported operation; retired inner-keeper tags and
+      default all are forbidden. Scoped cache operations cannot be combined
+      with other operations and require Docker Compose. Never apply the full
+      development Compose to production.
 
 - name: Detect Compose provider (mirrors scripts/container-runtime.sh)
   ansible.builtin.shell: |
-    runtime="{{ ai_ops_runtime }}"
+    runtime="{{ 'docker' if ansible_run_tags | intersect(['deploy-standard-cache-path', 'restart-openai-api-cache-keeper', 'rollback-standard-cache-path']) | length > 0 else ai_ops_runtime }}"
     if [ -z "$runtime" ]; then
       if command -v docker >/dev/null && docker info >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then runtime=docker;
       elif command -v podman >/dev/null && podman info >/dev/null 2>&1; then runtime=podman;
@@ -50,13 +59,16 @@
   delegate_to: localhost
   register: _ai_ops_cfg
   failed_when: not (_ai_ops_cfg.stat.exists and _ai_ops_cfg.stat.isdir)
+  when: ansible_run_tags | intersect(['restart-openai-api-cache-keeper', 'rollback-standard-cache-path']) | length == 0
 
 - name: Ensure protected state dir (apply only)
   ansible.builtin.file:
     path: "{{ ai_ops_deploy_root }}/.ai-ops-state"
     state: directory
     mode: "0700"
-  when: ai_ops_mode != "plan"
+  when:
+    - ai_ops_mode != "plan"
+    - ansible_run_tags | intersect(['deploy-standard-cache-path', 'restart-openai-api-cache-keeper', 'rollback-standard-cache-path']) | length == 0
 
 - name: Gather runtime versions
   ansible.builtin.shell: "{{ ai_ops_runtime if ai_ops_runtime != '' else 'docker' }} version --format '{{ '{{' }} .Server.Version {{ '}}' }}'"

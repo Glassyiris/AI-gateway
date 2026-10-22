@@ -11,8 +11,10 @@ Ansible never constructs configuration on the remote.
   configuration (YAML). `examples/vars.yml` is the documented template to copy from.
 - `roles/ai_ops/defaults/main.yml` — every operator-tunable variable, with default +
   comment. Override from inventory; never edit role files for local settings.
-- `roles/ai_ops/tasks/` — `preflight` (compose detection, connectivity, state dir),
-  `deploy-file` (drift gate + upload + activate), `rollback-file` (guarded restore).
+- `roles/ai_ops/tasks/` — shared preflight, component file operations, and
+  `standard-cache-path.yml` (one guarded primary-chain transaction).
+- `../scripts/ops/standard-cache-path.py` — scoped cache approval, activation,
+  private snapshot and exact-image rollback; standard library only.
 - `private-config/` — **gitignored** operator's private config directory
   (`compose.yaml`, `compose.override.yaml`, `.env`, `aisix/resources.yaml`,
   `cpa-model-sync/config.json`, `data/egress-proxy/policy.json`), adopted from
@@ -57,17 +59,23 @@ ansible-playbook ops.yml --tags deploy-models-enricher-config
 # Guarded models-enricher rollback restores the protected YAML and proves readiness.
 ansible-playbook ops.yml --tags rollback-models-enricher-config
 
-# Responses path: recreate ONLY response-keeper and apisix-models (never sub2api).
-# Plan prints four file diffs, the keeper digest and the protected container map;
-# apply needs the reviewed index digest and source revision, snapshots to
-# .rollback/responses-path-<UTC>/, verifies, and restores the snapshot on failure.
-ansible-playbook ops.yml --tags deploy-responses-path -e ai_ops_mode=plan
-ansible-playbook ops.yml --tags deploy-responses-path \
-  -e ai_ops_response_keeper_approved_digest=sha256:<index digest> \
-  -e ai_ops_response_keeper_expected_revision=<keeper commit>
+# Existing standard-cache primary chain only; adopt/edit private files first.
+# Review the sanitized plan and both commit+digest pins; copy approved_plan.
+ansible-playbook ops.yml --tags deploy-standard-cache-path -e ai_ops_mode=plan
+ansible-playbook ops.yml --tags deploy-standard-cache-path \
+  -e ai_ops_openai_api_cache_keeper_approved_plan=<64-hex-plan-hash>
 
-# Restart only keeper (clears its disposable history cache).
-ansible-playbook ops.yml --tags restart-response-keeper -e ai_ops_mode=plan
+# Keeper-only restart invalidates disposable checkpoints/background tasks.
+ansible-playbook ops.yml --tags restart-openai-api-cache-keeper -e ai_ops_mode=plan
+ansible-playbook ops.yml --tags restart-openai-api-cache-keeper \
+  -e ai_ops_openai_api_cache_keeper_approved_plan=<restart-plan-hash>
+
+# Select the snapshot basename returned by a successful scoped deploy.
+ansible-playbook ops.yml --tags rollback-standard-cache-path -e ai_ops_mode=plan \
+  -e ai_ops_openai_api_cache_keeper_snapshot=<standard-cache-UTC-id>
+ansible-playbook ops.yml --tags rollback-standard-cache-path \
+  -e ai_ops_openai_api_cache_keeper_snapshot=<standard-cache-UTC-id> \
+  -e ai_ops_openai_api_cache_keeper_approved_plan=<rollback-plan-hash>
 
 # Bounded host application recovery (Docker only): deploy local APISIX health
 # isolation first. This copies the guard/units, verifies probes, enables the timer;
@@ -104,13 +112,13 @@ defaults. Key ones:
 | `ai_ops_model_sync_log_tail` | `200` | maximum current-container log lines parsed for the round summary |
 | `ai_ops_models_enricher_verify_retries` / `ai_ops_models_enricher_verify_delay_seconds` | `30` / `2` | bounded wait for the recreated models-enricher readiness |
 | `ai_ops_adopted_direct_models` / `ai_ops_standalone_retained` | `[]` | AISIX orphan-report approval/exclusion lists |
-| `ai_ops_response_keeper_approved_digest` | `""` | keeper image index digest from the reviewed `deploy-responses-path` plan; required for apply |
-| `ai_ops_response_keeper_expected_revision` | `""` | keeper OCI revision label (source commit) checked after recreate |
-| `ai_ops_response_keeper_verify_retries` / `ai_ops_response_keeper_verify_delay_seconds` | `30` / `2` | bounded wait for keeper health and the route probes |
+| `ai_ops_openai_api_cache_keeper_approved_plan` | `""` | exact hash from this operation's reviewed plan; required for every scoped apply |
+| `ai_ops_openai_api_cache_keeper_snapshot` | `""` | scoped snapshot basename for rollback; no arbitrary path or legacy snapshot format |
+| `ai_ops_openai_api_cache_keeper_verify_retries` / `ai_ops_openai_api_cache_keeper_verify_delay_seconds` | `20` / `1` | bounded health retries/delay; each Docker health command also has a timeout |
 
 ## Drift gate
 
-Component deploys (`--tags deploy`, `deploy-aisix`, `deploy-model-sync`, `deploy-responses-path`) checksum each managed remote
+Component deploys (`--tags deploy`, `deploy-aisix`, `deploy-model-sync`) checksum each managed remote
 file against the recorded baseline (`.ai-ops-state/<file>.baseline`); a mismatch
 stops the deploy before any upload. Squid policy deploys (`--tags deploy-squid`)
 upload one tarball + a `sha256sum` manifest over all generated files; the drift
@@ -120,6 +128,70 @@ per-file checks (177 policy files would cost ~900 connections). If the remote wa
 edited by hand: review the shown diff/failing files, adopt the change into the
 local config, and re-run. Rollback likewise refuses to overwrite a remote file
 that changed independently after the deploy.
+
+## Standard-cache transaction safety
+
+These three tags require Linux and Docker Compose, an already-installed front
+keeper, and one explicit operation tag. They reject the old inner topology,
+Operator/network/namespace installation, mixed operations and default `all`.
+The retired `deploy-response-keeper`, `deploy-responses-path` and
+`restart-response-keeper` tags fail before runtime detection or managed writes.
+Use `ai_ops_mode=plan`, not Ansible `--check`.
+
+Adopt current private `compose.yaml`, `compose.override.yaml`, `.env`,
+`apisix/apisix.yaml`, `apisix-models/apisix.yaml`, `apisix-models/config.yaml`
+and `apisix-models/routing_selector.lua` before a deployment. Review the local
+candidate privately. The environment and override must equal live bytes. Only
+keeper/keepalive image and environment fields may differ in normalized Compose;
+other services, mounts, both cache volumes, networks and namespace owners must
+remain unchanged. Declared project networks must already exist; their IDs and
+attachment fingerprints are bound to the plan and checked afterward. Do not
+supply the full development Compose as production state. Restart and rollback do not need a local private-config directory.
+
+Plan reads current files, normalized Compose and container identities. It does
+not create managed files/directories/locks, pull images or activate containers.
+Ansible still uses its normal temporary transport files outside deployment state.
+Public output contains hashes, image references and identifiers, never private
+file diffs, environment values or raw Docker errors. Keep Ansible debug logging
+disabled; do not print private registered facts from external callbacks.
+
+Apply requires the exact plan hash, takes a nonblocking host lock and checks
+state again after image prefetch and immediately before activation. Both images
+must use `ghcr.io/xz-dev/<service>:<40-hex-source-commit>@sha256:<index-digest>`;
+OCI revision labels must match those commit tags. A non-noop deploy stops
+keepalive ingress, writes the five selected configuration files in place,
+checks APISIX syntax, and recreates only keeper, inner APISIX and keepalive in
+that order with `--no-deps --no-build --pull never`. Activation pins exact local
+content IDs, preserving inner APISIX's running image even if a local tag moved.
+Outer APISIX is reload-only.
+Health, actual images, resource limits, namespace identity, exclusive disk store
+and protected container IDs must verify. Unchanged deployments do not recreate
+or pull. All other production writers and the host recovery timer require a
+coordinated maintenance window; this lock serializes this tool, not arbitrary
+administrative commands.
+
+Private snapshots are `.rollback/standard-cache-<UTC>-<id>/` (directory `0700`,
+files `0600`). They preserve all seven file bytes and exact old local image IDs;
+rollback uses a checksummed image overlay, never a floating tag, build or pull.
+Independent file/runtime drift refuses restoration. Failure during activation
+attempts exact restoration and still returns failure; an unverified rollback
+explicitly requires operator recovery. A partial in-place write tracks its own
+written prefix so ENOSPC is not mistaken for an unrelated edit. These are not
+power-loss/crash-consistency guarantees. Preserve snapshots until reviewed;
+manual recovery may be needed after a failed rollback.
+
+Keeper-only restart never pulls, recreates, edits routes or touches keepalive.
+It invalidates disposable task/checkpoint state; process health is not successful
+SSE replay. The offline tests include the complete Ansible entry point against
+a fake runtime:
+
+```bash
+python3 scripts/test-standard-cache-operations.py  # run from repository root
+```
+
+Ansible must be installed for the entry-point test; CI installs an isolated,
+pinned copy. Offline tests are not a live rollback drill, Operator acceptance,
+production replay proof or authorization to deploy.
 
 ## Model-sync policy safety
 

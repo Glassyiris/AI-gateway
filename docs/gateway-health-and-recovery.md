@@ -78,6 +78,22 @@ systemctl stop ai-gateway-recovery.service
 
 A restart request already accepted by Docker can still finish after the guard stops. Check state and container identity before taking further action.
 
+## Scoped standard-cache maintenance
+
+Use the [standard-cache Ansible transaction](../ansible/README.md#standard-cache-transaction-safety)
+for the existing primary chain. Each deploy, keeper-only restart and rollback
+needs its own read-only plan and exact approval hash. Deploy may recreate only
+keeper, keepalive and inner APISIX; outer APISIX is reload-only. Restart touches
+keeper only and invalidates disposable task/checkpoint state. Rollback uses
+private, checksummed configuration and exact old local image IDs, and fails
+closed on independent drift or unverified restoration.
+
+Coordinate a maintenance window with other owners and this recovery timer.
+The transaction lock does not serialize timer restarts or arbitrary Docker
+commands. Offline fake-runtime tests do not prove live rollback, terminal SSE
+replay, Operator ACLs or long-term stability, and do not authorize production
+execution.
+
 ## Verification and limits
 
 ```bash

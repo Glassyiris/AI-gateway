@@ -62,6 +62,15 @@ ai_ops_compose_project: ai-gateway
 # ai_ops_models_enricher_verify_retries: 30
 # ai_ops_models_enricher_verify_delay_seconds: 2
 
+# --- Standard-cache primary chain (Docker Compose only) ---------------------
+# Exact plan hash for deploy / keeper-only restart / rollback. Empty refuses apply.
+# ai_ops_openai_api_cache_keeper_approved_plan: ""
+# Snapshot basename returned by a scoped deploy, required for rollback.
+# ai_ops_openai_api_cache_keeper_snapshot: ""
+# Bounded health retries and delay; each health command also has a timeout.
+# ai_ops_openai_api_cache_keeper_verify_retries: 20
+# ai_ops_openai_api_cache_keeper_verify_delay_seconds: 1
+
 # --- Squid ------------------------------------------------------------------
 # Pinned image used for offline `-k parse` validation of rendered policy.
 # ai_ops_squid_image: ai-gateway-squid:6.13-2-deb13u3-r1
