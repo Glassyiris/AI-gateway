@@ -82,6 +82,6 @@ Known Sub2API bridge limitation, not yet fixed: on one WebSocket, a turn that se
 
 ## Known production drift (2026-10-22)
 
-- Production `apisix-models/apisix.yaml` has an extra `responses-websocket-auth` route (direct WebSocket GET to CPA with caller-key check). It is not in this repository, and with `http_bridge` on every account Sub2API no longer uses it. Remove it from production or adopt it here; do not deploy the repository template over it unreviewed.
+- The temporary `responses-websocket-auth` route (added 11:05 UTC) was removed from production at 14:46 UTC. Production `apisix-models/apisix.yaml` again equals this repository.
 - `config.yaml` still declares the `routing_lkg` shared dict. The selector no longer uses it.
 - `openspec/changes/stabilize-responses-path` describes the retired keeper topology and catalog lookup. Do not archive it as-is.
