@@ -25,8 +25,6 @@ nginx_config:
   http:
     # Expanded history stays internal; route/global client-control retains other limits.
     client_max_body_size: 64m
-    custom_lua_shared_dict:
-      routing_lkg: 1m
 deployment:
   role: data_plane
   role_data_plane:
