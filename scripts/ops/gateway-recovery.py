@@ -20,7 +20,7 @@ PROJECT = "ai-gateway"
 CHECKS = {
     "cli-proxy-api": (8317, "/v1/models", 200),
     "sub2api": (8080, "/health", 200),
-    "response-keeper": (8085, "/healthz", 200),
+    "openai-api-cache-keeper": (8085, "/healthz", 200),
     "models-enricher": (8090, "/healthz", 200),
     "ai-sse-keepalive-proxy": (8080, "/healthz", 200),
     "apisix": (9080, "/v1/models", 404),
@@ -272,7 +272,8 @@ def run(apply):
     if len(by_service) != len(CHECKS):
         raise RuntimeError("application ownership mismatch")
     # Existing service key stays in this process's memory, never argv or logs.
-    key = next((item.partition("=")[2] for item in by_service["response-keeper"]["Config"].get("Env") or []
+    # The cache keeper holds no CPA key; apisix-models still carries the client key.
+    key = next((item.partition("=")[2] for item in by_service["apisix-models"]["Config"].get("Env") or []
                 if item.startswith("CPA_API_KEY=")), None)
     filename = STATE_DIR / "state.json"
     state = json.loads(filename.read_text()) if filename.exists() else {}

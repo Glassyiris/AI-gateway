@@ -23,7 +23,7 @@ The Rust sidecar manages only the five supported API-key kinds through CPA's int
 Management API. Gemini/Interactions retain Go inventory behavior; Go metadata,
 OAuth/native visibility, static aliases and downstream authorization remain separate.
 
-Reusable Docker Compose stack for [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), [Sub2API](https://github.com/Wei-Shaw/sub2api), [AISIX](https://github.com/api7/aisix), [Apache APISIX](https://apisix.apache.org/), [ai-sse-keepalive-proxy](https://github.com/xz-dev/ai-sse-keepalive-proxy), [response-keeper](https://github.com/xz-dev/response-keeper), [Squid](https://www.squid-cache.org/), [socat](http://www.dest-unreach.org/socat/), and [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/).
+Reusable Docker Compose stack for [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), [Sub2API](https://github.com/Wei-Shaw/sub2api), [AISIX](https://github.com/api7/aisix), [Apache APISIX](https://apisix.apache.org/), [ai-sse-keepalive-proxy](https://github.com/xz-dev/ai-sse-keepalive-proxy), [openai-api-cache-keeper](https://github.com/xz-dev/openai-api-cache-keeper), [Squid](https://www.squid-cache.org/), [socat](http://www.dest-unreach.org/socat/), and [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/).
 
 It separates provider credentials, client API-key authority, logical-model routing, public routing, and Internet ingress:
 
@@ -33,18 +33,18 @@ flowchart LR
   Cloudflare --> cloudflared
   cloudflared --> APISIX[APISIX front door]
   APISIX --> Keepalive[AI SSE keepalive proxy]
-  Keepalive --> Sub2API
+  Operator[Operator via localhost/Tailscale] --> Keepalive
+  Keepalive --> Keeper[openai-api-cache-keeper]
+  Keeper --> Sub2API
   Sub2API -->|cli-proxy-api:8317 relay| Models[apisix-models internal APISIX]
-  Models -->|/v1/responses, /rk/v1/responses<br/>HTTP + WebSocket| Keeper[response-keeper]
-  Keeper -->|routing-index lookup| Enricher
-  Keeper -->|per turn| CPA[CLIProxyAPI]
-  Keeper -->|per turn| AISIX
+  Models -->|Responses HTTP: catalog selector| CPA[CLIProxyAPI]
+  Models -->|Responses HTTP: catalog selector| AISIX
   Models -->|chat/images: catalog selector| CPA
   Models -->|chat/images: catalog selector| AISIX
   Sub2API -->|AISIX accounts| AISIX
   AISIX --> CPA
   APISIX -->|versioned /v1/models| Sidecar[model-catalog-sidecar]
-  Operator[Operator via localhost/Tailscale] -->|/models-table| Sidecar
+  Operator -->|/models-table| Sidecar
   Operator -->|/status| Status
   Sidecar --> Models
   Models -->|/v1/models, /models-table| Enricher[models-enricher]
@@ -81,7 +81,7 @@ flowchart LR
 - The unauthenticated model diagnostics page on host port `9083` may publish only on loopback or an explicit Tailscale address. Validation checks the effective merged Compose configuration and rejects omitted host addresses, IPv4/IPv6 wildcards, and public IP bindings; failed public-IP probes are not evidence of a private binding.
 - Every directed TCP edge, including all four AISIX edges (`sub2api-aisix`, `enricher-aisix`, `apisix-models-aisix`, `aisix-cpa`), uses an independent explicit-version `alpine/socat` relay between disjoint `*-source` and `*-target` internal networks. A Docker network itself has no direction; direction comes from who listens where. Every relay therefore binds only its own source-side address (`bind=`). AISIX proxy binds its three relay-target addresses, AISIX Admin and metrics bind `aisix-status-admin`, both APISIX data planes bind their relay targets plus loopback with the default TLS listener disabled, and the catalog bridge binds its source address. Other applications, including Sub2API and the enricher, still have wildcard listeners inside their route-stripped namespaces. The separated networks and relay bindings block the target from initiating a new connection across the relay toward the source application; established TCP connections remain bidirectional.
 - Residual trust: a relay can reach listeners on its target network and any listener its source-side peer exposes on their shared source network. Relays run as `65534`, read-only and without capabilities; the CPA host relay uses a fixed shell supervision loop, so absence of a shell is not a blanket guarantee.
-- `response-keeper` owns no network. It shares the `apisix-models` namespace, listens only on `127.0.0.1:8085`, publishes no port, and reaches CPA and the routing index through that namespace's existing one-way relays and AISIX through `apisix-models-aisix`. It runs as `65534:65534` with a read-only root, no capabilities and `no-new-privileges`; its only writable path is the disposable `response-keeper-cache` volume.
+- `openai-api-cache-keeper` shares the keepalive namespace, listens only on `127.0.0.1:8085`, publishes no port, and reaches Sub2API through the existing one-way relay. It runs as `65534:65534` with a read-only root, no capabilities and `no-new-privileges`; only its disposable disk volume is writable. Local cached reads/cancellation revalidate the caller through Sub2API's billing endpoint and fail closed. Operator bypasses public filtering, never API authentication.
 - Every internal network has an explicit bounded membership; no service uses Compose's default network. CPA, Sub2API, APISIX, AISIX, and AI SSE middleware share networking with minimal Alpine namespace owners that delete all default routes and drop privilege. Separate host-ingress namespace owners hold published ports and the source/target sides of socat-relayed edges. This remains portable across rootless Podman and rootful Docker without host firewall changes or engine-specific bridge options.
 - CPA and Sub2API have no direct Internet route. Each reaches Squid only through its own source/target socat relay pair. AISIX has no Internet or Squid edge at all. Its configured application egress reaches CPA through `aisix-cpa-relay`; its three inbound relay edges do not provide reverse initiation into Sub2API, the enricher or `apisix-models`. Admin and metrics remain on the private status network. Squid alone joins `proxy-egress`; cloudflared alone joins its egress network and reaches APISIX only through its own relay. APISIX has no Internet route.
 - An optional `provider-sidecar` stays out of the reusable base Compose file. This is a generic role for an explicit-version OpenAI-compatible service whose runtime-specific image, environment, mounts, command, healthcheck, domains, models, and credentials exist only in ignored production state. The generated override supplies reusable TLS, shared-TUN, virtual-DNS, relay, and Squid boundaries without naming or embedding a concrete provider.
@@ -259,33 +259,24 @@ Override the built-in provider in the user's private `~/.pi/agent/models.json`:
 
 The higher-priority APISIX Codex Responses route matches only that marker plus a nonempty `x-api-key`. It removes the parse-only `Authorization` and marker before proxying; it neither stores nor validates the credential. Sub2API remains the sole API-key authority and authenticates `x-api-key`. Requests missing either header fail closed through the normal opaque public response policy. The same `/backend-api/codex/responses` path handles POST/SSE and GET/WebSocket.
 
-Set `GATEWAY_OPENAI_WS_MODE_ROUTER_V2_ENABLED=true` only after enabling a reviewed WebSocket mode on the corresponding Sub2API account. In Pi settings, `transport: "websocket"` reuses one connection while sending full context and is the supported mode for the current CPA-backed path. `transport: "websocket-cached"` sends `previous_response_id` plus only the new input delta; response-keeper stores history and returns reusable `resp_*` IDs for this path, and the OpenAI Responses extension can carry a server-confirmed continuation across socket reconnects. Keeper state is not persisted, so after a keeper restart the client receives `previous_response_not_found` and resends full history once. `transport: "sse"` remains the explicit HTTP streaming mode.
+Set `GATEWAY_OPENAI_WS_MODE_ROUTER_V2_ENABLED=true` only after enabling a reviewed WebSocket mode on the corresponding Sub2API account. In Pi settings, `transport: "websocket"` reuses one connection while sending full context and is the supported mode for the current CPA-backed path. `transport: "websocket-cached"` sends `previous_response_id` plus only the new input delta. Native WebSocket forwarding and server-owned IDs retain their existing incremental contract; cached IDs do not transfer history ownership to keeper. There is no new WebSocket recovery protocol. `transport: "sse"` remains explicit HTTP streaming; same-generation replay requires the documented background Responses contract and an explicitly capable client.
 
-### Responses path through response-keeper
-
-Every OpenAI Responses turn that reaches `apisix-models` goes through [response-keeper](https://github.com/xz-dev/response-keeper), a sidecar in the `apisix-models` network namespace listening on `127.0.0.1:8085`:
+### Standard Responses cache path
 
 ```text
-Sub2API -> cli-proxy-api:8317 relay -> apisix-models (/v1/responses, /rk/v1/responses) -> response-keeper -> CPA or AISIX
+APISIX or restricted Operator -> keepalive -> openai-api-cache-keeper -> Sub2API
+Sub2API -> its existing CPA/AISIX route (no second keeper)
 ```
 
-- **One traversal.** Both `/v1/responses` and `/rk/v1/responses` (POST, SSE and WebSocket) route straight to keeper without any body-reading plugin. Keeper calls `cpa:8317` or `aisix:3000` itself; Responses never loop back to `apisix-models:9080`. `/rk/*` paths other than Responses still pass through to the normal routes.
-- **Per-turn routing.** Keeper looks up the original top-level `model` at `models-enricher:8090/routing-index` once per HTTP request or WebSocket turn, with a 1.6 s overall limit and no cross-backend retry. A recent authoritative `cpa`/`aisix` answer is kept for 15 minutes and used only when the index is unreachable; `not_found` returns `404 model_not_found` and `unavailable` or a cold miss returns `503`.
-- **Credentials.** CPA receives `Authorization: Bearer ${CPA_API_KEY}`; AISIX receives the caller's original header. History ownership always derives from the caller's credential, so one caller cannot continue another's `previous_response_id`.
-- **History.** Keeper expands `previous_response_id` from a disposable, deduplicated bbolt cache on the named volume `response-keeper-cache` (`STORE_DIR=/var/tmp/response-keeper`, real disk, never tmpfs). Nothing survives a restart; clients then receive `previous_response_not_found` and resend full history once. It also removes top-level `prompt_cache_retention`.
-- **Limits.** Responses routes accept bodies up to 32 MiB (keeper's own request limit). Other `apisix-models` routes keep 16 MiB through a global `client-control` rule; nginx `client_max_body_size` is 32m, so `apisix-models/apisix.yaml` and `config.yaml` must be deployed and rolled back together.
-- **Chat and images.** `/v1/chat/completions` and `/v1/images/generations` still use the Lua catalog selector (`apisix-models/routing_selector.lua`) with the same 15-minute last-known-good fallback in the `routing_lkg` shared dict.
+Keeper uses standard Responses paths only; no `/rk` alias, prefix stripping or private recovery header exists. Ordinary/unverified APIs, upstream errors and non-SSE responses remain transparent. Keeper does not select accounts/models or implement billing.
 
-Deploy keeper and these routes only with the scoped tag, which recreates `response-keeper` and `apisix-models` and nothing else:
+- **Replay.** A supported `background: true` Responses stream has one upstream generation. Standard `GET /v1/responses/{id}?stream=true&starting_after=N` replays complete retained events, then follows the same generation. Cancel uses the standard cancel path. Missing, expired or failed task state is an explicit error, never hidden regeneration.
+- **Ownership.** Cached reads and cancellation revalidate credentials through `/v1/sub2api/billing`; the owner digest isolates tasks but is not authentication. Caller credentials remain intact through the chain.
+- **Checkpoint.** Keeper-owned history uses a budgeted disk spool and bbolt volume `openai-api-cache-keeper-cache` at `/var/tmp/openai-api-cache-keeper`. Native `previous_response_id` and native WebSocket history ownership remain separate. Restart invalidates disposable task/checkpoint state.
+- **Limits.** Keeper uses 384 MiB, 0.5 CPU, 64 PID and no swap; payload/history/event storage shares a 200 MiB disk budget. Keepalive retains 128 MiB, with `GOMEMLIMIT=96MiB` and an 8 MiB inspection limit. Larger bodies pass through without keepalive heartbeats. Expanded internal Responses history is bounded at 64 MiB; other inner routes retain 16 MiB.
+- **Operator.** Reusable Compose defines a loopback-only `:8087` entrance to the same keepalive namespace, bypassing APISIX filters but not authentication. A specific Tailscale binding needs an explicit ACL. The urgent production cutover deferred this new entrance to avoid recreating namespaces; that is not two-entrance acceptance.
 
-```bash
-ansible-playbook ops.yml --tags deploy-responses-path -e ai_ops_mode=plan
-ansible-playbook ops.yml --tags deploy-responses-path \
-  -e ai_ops_response_keeper_approved_digest=sha256:<index digest> \
-  -e ai_ops_response_keeper_expected_revision=<keeper commit>
-```
-
-Apply snapshots the previous files and keeper image selector to `.rollback/responses-path-<UTC>/`, verifies both aliases are answered by keeper, that no Responses access line targets `127.0.0.1:9080` and that every other container ID is unchanged, and restores the snapshot on failure. The legacy `deploy-response-keeper` tag also recreates Sub2API; do not use it for this topology.
+Pin both GHCR images by commit and digest. Snapshot the entire old Compose, private override/environment, both APISIX configurations and old image identities before switching. Stop the old inner keeper; never run two history owners on the request path or share their volumes. Preserve unrelated production service settings. The legacy Ansible `deploy-response-keeper`, `deploy-responses-path` and `restart-response-keeper` tags fail during preflight: they describe the retired topology. Replacement scoped deployment/restart/rollback automation remains unfinished. Deployment and rollback must move the inner routing selector and its 64 MiB nginx setting together.
 
 ### Optional provider-sidecar
 
@@ -462,7 +453,8 @@ See [the 2026-09-05 closeout](docs/catalog-round-closeout.md) for OpenSpec phase
 │   ├── egress-proxy/
 │   └── sub2api/
 ├── middleware/
-│   └── ai-sse-keepalive-proxy/ # pinned submodule, built locally by Compose
+│   ├── ai-sse-keepalive-proxy/ # pinned submodule and CI image
+│   └── openai-api-cache-keeper/ # pinned submodule and CI image
 ├── scripts/
 │   ├── init.sh
 │   ├── init-egress-proxy.sh

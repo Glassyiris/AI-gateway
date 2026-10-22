@@ -299,7 +299,7 @@ if not services or not networks:
     raise SystemExit("Compose must define services and networks")
 # Persistent state lives in backed-up data/ binds. The only named volume is
 # keeper's disposable history cache (cleared on start), mounted by keeper alone.
-ALLOWED_VOLUMES = {"response-keeper-cache"}
+ALLOWED_VOLUMES = {"openai-api-cache-keeper-cache"}
 if "default" in networks or set(compose.get("volumes") or {}) - ALLOWED_VOLUMES:
     raise SystemExit("default network and named persistent volumes are forbidden")
 def volume_mounts(config):
@@ -313,7 +313,7 @@ def volume_mounts(config):
 
 for service, config in services.items():
     for source, _ in volume_mounts(config):
-        if source in ALLOWED_VOLUMES and service != "response-keeper":
+        if source in ALLOWED_VOLUMES and service != "openai-api-cache-keeper":
             raise SystemExit(f"{service} must not mount the keeper cache volume")
 
 def service_networks(config):
@@ -395,9 +395,8 @@ for service, config in services.items():
     if image_tag.lower() == "latest" or not any(char.isdigit() for char in image_tag):
         raise SystemExit(f"image tag is not an explicit non-floating version: {service}={image_tag}")
 
-# The diagnostic table is not a public API. Validate the effective (merged)
-# bindings, not only the reusable Compose file: private overrides can widen it.
-def private_table_binding(port):
+# Validate merged private bindings: overrides must not expose trusted listeners.
+def private_host_binding(port, target_port, published_port=None):
     if isinstance(port, dict):
         host, published, target, protocol = (port.get(k) for k in ("host_ip", "published", "target", "protocol"))
         protocol = protocol or "tcp"
@@ -410,8 +409,9 @@ def private_table_binding(port):
         host, protocol = host.strip("[]"), protocol or "tcp"
     try:
         ip = ipaddress.ip_address(host or "")
-        return (ip.is_loopback or ip in ipaddress.ip_network("100.64.0.0/10")) and str(published) == "9083" and str(target) == "9080" and protocol == "tcp"
-    except ValueError:
+        published = int(published)
+        return (ip.is_loopback or ip in ipaddress.ip_network("100.64.0.0/10")) and 1 <= published <= 65535 and (published_port is None or published == published_port) and str(target) == str(target_port) and protocol == "tcp"
+    except (TypeError, ValueError):
         return False
 
 for port, expected in (
@@ -423,13 +423,31 @@ for port, expected in (
     ({"published": "9083", "target": 9080}, False),
     ("203.0.113.1:9083:9080", False),
 ):
-    if private_table_binding(port) != expected:
+    if private_host_binding(port, 9080, 9083) != expected:
         raise SystemExit(f"models-table binding self-test failed: {port}")
 table_ports = services.get("models-table-host-netns", {}).get("ports") or []
-if not table_ports or not all(private_table_binding(port) for port in table_ports):
+if not table_ports or not all(private_host_binding(port, 9080, 9083) for port in table_ports):
     raise SystemExit("models-table port 9083 must publish only on loopback or an explicit Tailscale address, never wildcard/public")
 
 network_members = {name: members(name) for name in networks}
+
+operator_owner = services.get("operator-host-netns", {})
+operator_ports = operator_owner.get("ports") or []
+if not operator_ports or not all(private_host_binding(port, 8080) for port in operator_ports):
+    raise SystemExit("Operator must publish only on loopback or explicit Tailscale IP, forwarding TCP to port 8080")
+if service_networks(operator_owner) != {"operator-host-source", "host-operator-target"} \
+        or network_members.get("operator-host-source") != {"operator-host-netns"} \
+        or network_members.get("host-operator-target") != {"operator-host-netns", "ai-sse-keepalive-proxy-netns"}:
+    raise SystemExit("Operator must use its isolated host edge into the shared keepalive namespace")
+operator_relay = services.get("operator-host-relay", {})
+if operator_relay.get("network_mode") != "service:operator-host-netns" or not relay_is_hardened("operator-host-relay") \
+        or "TCP4-LISTEN:8080,bind=172.30.21.2," not in command_text(operator_relay) \
+        or "TCP4:172.30.22.2:8080," not in command_text(operator_relay):
+    raise SystemExit("Operator relay must target only the shared keepalive, not APISIX or Sub2API directly")
+if (services.get("ai-sse-keepalive-proxy", {}).get("environment") or {}).get("LISTEN_ADDR") != ":8080":
+    raise SystemExit("shared keepalive must accept both ingress relay targets on port 8080")
+if (services.get("sub2api", {}).get("environment") or {}).get("SECURITY_TRUST_FORWARDED_IP_FOR_API_KEY_ACL") != "false":
+    raise SystemExit("Operator ingress must not trust caller-supplied forwarded IP for API-key ACLs")
 
 # AISIX has no direct data network: each of its four edges is an ordinary
 # one-way source/target relay pair, checked by the generic edge loop below.
@@ -486,33 +504,37 @@ if selector_service.get("ports") or selector_service.get("network_mode") != "ser
 if "/opt/apisix/custom/routing_selector.lua" not in volume_targets(selector_service):
     raise SystemExit("catalog routing selector module must be mounted read-only into APISIX")
 
-# response-keeper is a loopback-only sidecar in the selector namespace; it owns
-# no network edge and reaches CPA/AISIX/routing index through that namespace.
-keeper = services.get("response-keeper", {})
+# One front keeper shares keepalive's namespace and forwards only to Sub2API.
+keeper = services.get("openai-api-cache-keeper", {})
 keeper_env = keeper.get("environment") or {}
-if keeper.get("network_mode") != "service:apisix-models-netns" or keeper.get("ports") or keeper.get("networks"):
-    raise SystemExit("response-keeper must share only the apisix-models namespace without ports")
-# Routed mode: keeper selects CPA/AISIX itself and never loops back to apisix-models:9080.
-keeper_routed = {
-    "ROUTING_INDEX_URL": "http://models-enricher:8090/routing-index",
-    "UPSTREAM_CPA_URL": "http://cpa:8317",
-    "UPSTREAM_AISIX_URL": "http://aisix:3000",
+if keeper.get("network_mode") != "service:ai-sse-keepalive-proxy-netns" or keeper.get("ports") or keeper.get("networks"):
+    raise SystemExit("cache keeper must share only the keepalive namespace without ports")
+keeper_target = {
+    "UPSTREAM_URL": "http://sub2api-ai-sse-relay:8080",
     "LISTEN_ADDR": "127.0.0.1:8085",
-    "STORE_DIR": "/var/tmp/response-keeper",
+    "STORE_DIR": "/var/tmp/openai-api-cache-keeper",
 }
-if any(keeper_env.get(k) != v for k, v in keeper_routed.items()) or "UPSTREAM_URL" in keeper_env \
-        or not keeper_env.get("CPA_API_KEY") \
-        or keeper_env.get("CPA_API_KEY") != (services.get("apisix-models", {}).get("environment") or {}).get("CPA_API_KEY") \
+if any(keeper_env.get(k) != v for k, v in keeper_target.items()) \
+        or {"CPA_API_KEY", "ROUTING_INDEX_URL", "UPSTREAM_CPA_URL", "UPSTREAM_AISIX_URL"} & set(keeper_env) \
         or str(keeper_env.get("REQUIRE_NO_DEFAULT_ROUTE")) != "true":
-    raise SystemExit("response-keeper must listen on loopback in routed mode with direct CPA/AISIX upstreams")
-if ("response-keeper-cache", "/var/tmp/response-keeper") not in set(volume_mounts(keeper)):
-    raise SystemExit("response-keeper must keep its disposable cache on the response-keeper-cache volume")
+    raise SystemExit("cache keeper must use one Sub2API upstream, not model routing or a CPA key")
+keepalive = services.get("ai-sse-keepalive-proxy", {})
+if (keepalive.get("environment") or {}).get("UPSTREAM_URL") != "http://127.0.0.1:8085" \
+        or ((keepalive.get("depends_on") or {}).get("openai-api-cache-keeper") or {}).get("condition") != "service_healthy":
+    raise SystemExit("keepalive must enter the shared healthy cache keeper before Sub2API")
+if "response-keeper" in services:
+    raise SystemExit("the old inner response-keeper must not remain active")
+if ("openai-api-cache-keeper-cache", "/var/tmp/openai-api-cache-keeper") not in set(volume_mounts(keeper)):
+    raise SystemExit("cache keeper must use its exclusive disk cache volume")
 if str(keeper.get("user")) != "65534:65534" or keeper.get("read_only") is not True or {str(cap).upper() for cap in keeper.get("cap_drop", [])} != {"ALL"} or keeper.get("cap_add"):
-    raise SystemExit("response-keeper must be non-root/read-only and drop all capabilities")
-if "no-new-privileges:true" not in keeper.get("security_opt", []) or not keeper.get("mem_limit") or not keeper.get("pids_limit"):
-    raise SystemExit("response-keeper must set no-new-privileges and resource limits")
+    raise SystemExit("cache keeper must be non-root/read-only and drop all capabilities")
+if "no-new-privileges:true" not in keeper.get("security_opt", []) \
+        or str(keeper.get("mem_limit")).lower() not in {"384m", str(384 * 1024 * 1024)} \
+        or str(keeper.get("memswap_limit")).lower() not in {"384m", str(384 * 1024 * 1024)} \
+        or int(keeper.get("pids_limit") or 0) != 64 or float(keeper.get("cpus") or 0) != 0.5:
+    raise SystemExit("cache keeper must retain 384 MiB, no swap, 0.5 CPU and 64 PIDs")
 if (sub2api_env := services.get("sub2api", {}).get("environment") or {}).get("GATEWAY_OPENAI_WS_INGRESS_PREVIOUS_RESPONSE_RECOVERY_ENABLED") is None:
-    raise SystemExit("Sub2API must pin WS previous_response recovery explicitly for response-keeper")
+    raise SystemExit("Sub2API must pin WS previous_response recovery explicitly")
 
 if service_networks(status_service) != {"aisix-status-admin"}:
     raise SystemExit("AISIX status renderer must attach only to aisix-status-admin")
@@ -669,10 +691,11 @@ for service, config in services.items():
     if service != "egress-proxy" and any(target.endswith("/ca.key") for target in volume_targets(config)):
         raise SystemExit(f"dedicated CA private key mounted by service: {service}")
 PY
+python3 scripts/test-standard-cache-topology.py
 
 # Build local components and parse their native configuration. These are syntax
 # gates, not snapshots of ports, service counts, or application policy values.
-BUILDAH_FORMAT=docker "${COMPOSE[@]}" "${compose_args[@]}" --env-file "$env_file" build ai-sse-keepalive-proxy >/dev/null
+BUILDAH_FORMAT=docker "${COMPOSE[@]}" "${compose_args[@]}" --env-file "$env_file" build ai-sse-keepalive-proxy openai-api-cache-keeper >/dev/null
 egress_image=$(value_from_env EGRESS_PROXY_IMAGE)
 [ -n "$egress_image" ] || egress_image=ai-gateway-squid:6.13-2-deb13u3-r1
 "${RUNTIME[@]}" build --quiet --tag "$egress_image" egress-proxy >/dev/null
@@ -760,7 +783,7 @@ for required in (
     if required not in selector:
         raise SystemExit(f"incomplete catalog routing selector: {required}")
 if "/v1/responses" in selector:
-    raise SystemExit("Responses must route to response-keeper, not the Lua catalog selector")
+    raise SystemExit("Responses must use their separate expanded-history size boundary")
 for forbidden in ("ai-proxy-multi", "alias-gpt-", "alias-grok-", "alias-team-"):
     if forbidden in text:
         raise SystemExit(f"legacy HTTP alias still conflicts with catalog selection: {forbidden}")
@@ -779,24 +802,20 @@ edits = route("aisix-images-edits")
 for required in ("uri: /v1/images/edits", "      - POST", "upstream_id: aisix"):
     if required not in edits:
         raise SystemExit(f"incomplete AISIX images edits route: {required}")
-if "__CPA_API_KEY__" in edits or text.count("__CPA_API_KEY__") != 1 or selector.count("__CPA_API_KEY__") != 1:
-    raise SystemExit("CPA service credential placeholder must occur only at the selector boundary")
+if "__CPA_API_KEY__" in edits or text.count("__CPA_API_KEY__") != 2 or selector.count("__CPA_API_KEY__") != 1:
+    raise SystemExit("CPA service credentials must occur only at the two HTTP selector boundaries")
 if '  - id: aisix\n' not in text or '      "aisix:3000": 1' not in text:
     raise SystemExit("catalog selector AISIX upstream is missing")
-keeper_route = route("response-keeper-responses")
-for required in ("      - /v1/responses\n      - /rk/v1/responses", "      - GET\n      - POST", "priority: 110", "enable_websocket: true", "uri: /v1/responses", "upstream_id: response-keeper", "disable_proxy_buffering: true", "max_body_size: 33554432"):
-    if required not in keeper_route:
-        raise SystemExit(f"incomplete response-keeper route: {required}")
-if "serverless" in keeper_route or "upstream_id: self" in keeper_route:
-    raise SystemExit("response-keeper route must not read the body or loop back to apisix-models")
-if 'max_body_size: 16777216' not in text or '["route_id", "~=", "response-keeper-responses"]' not in text:
-    raise SystemExit("non-Responses routes must keep the 16 MiB body limit")
-keeper_rest = route("response-keeper-passthrough")
-for required in ("uri: /rk/*", "priority: 105", 'regex_uri: ["^/rk(/.*)$", "$1"]', "upstream_id: self", "enable_websocket: true"):
-    if required not in keeper_rest:
-        raise SystemExit(f"incomplete response-keeper passthrough route: {required}")
-if '      "127.0.0.1:8085": 1' not in text or '      "127.0.0.1:9080": 1' not in text:
-    raise SystemExit("response-keeper loopback upstreams are missing")
+responses = route("responses-routing-selector")
+for required in ("uri: /v1/responses", "methods: [POST]", "priority: 110", 'require("routing_selector").run(_, ctx, "__CPA_API_KEY__")', "upstream_id: cpa", "disable_proxy_buffering: true", "max_body_size: 67108864"):
+    if required not in responses:
+        raise SystemExit(f"incomplete standard Responses selector: {required}")
+if 'max_body_size: 16777216' not in text or '["route_id", "~=", "responses-routing-selector"]' not in text:
+    raise SystemExit("other routes must keep 16 MiB while Responses admits bounded expanded history")
+if "/rk" in text or "upstream_id: response-keeper" in text or '      "127.0.0.1:8085": 1' in text or '  - id: self\n' in text:
+    raise SystemExit("inner APISIX must not retain private aliases, a duplicate keeper or a self loop")
+if "enable_websocket: true" not in route("catch-all") or "upstream_id: cpa" not in route("catch-all"):
+    raise SystemExit("native WebSocket forwarding must remain on the normal downstream path")
 PY
 
 apisix_image=$(value_from_env APISIX_IMAGE)

@@ -24,6 +24,7 @@ local READ_TIMEOUT_MS = 1000
 local KEEPALIVE_TIMEOUT_MS = 60000
 local KEEPALIVE_POOL_SIZE = 100
 local MAX_REQUEST_BYTES = 16 * 1024 * 1024
+local MAX_RESPONSES_BYTES = 64 * 1024 * 1024 -- bounded history expanded by the front keeper
 local MAX_INDEX_BYTES = 1024
 local MAX_MODEL_BYTES = 1024
 local LKG_TTL_S = 900 -- last-known-good routing decision, failure fallback only
@@ -34,10 +35,11 @@ local MODEL_NOT_FOUND = '{"error":{"code":"model_not_found","message":"Model not
 local UNAVAILABLE = '{"error":{"code":"service_unavailable","message":"Model routing is temporarily unavailable.","type":"server_error"}}'
 
 local function request_body()
+    local limit = ngx.var and ngx.var.uri == "/v1/responses" and MAX_RESPONSES_BYTES or MAX_REQUEST_BYTES
     ngx.req.read_body()
     local body = ngx.req.get_body_data()
     if body then
-        if #body > MAX_REQUEST_BYTES then
+        if #body > limit then
             return nil
         end
         return body
@@ -50,9 +52,9 @@ local function request_body()
     if not file then
         return nil
     end
-    body = file:read(MAX_REQUEST_BYTES + 1)
+    body = file:read(limit + 1)
     file:close()
-    if not body or #body > MAX_REQUEST_BYTES then
+    if not body or #body > limit then
         return nil
     end
     return body

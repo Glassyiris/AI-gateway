@@ -23,25 +23,8 @@ upstreams:
       connect: 3600
       send: 3600
       read: 3600
-  # response-keeper共享本命名空间，逐turn选路后直连CPA/AISIX，不回到9080。
-  - id: response-keeper
-    type: roundrobin
-    nodes:
-      "127.0.0.1:8085": 1
-    timeout:
-      connect: 5
-      send: 3600
-      read: 3600
-  - id: self
-    type: roundrobin
-    nodes:
-      "127.0.0.1:9080": 1
-    timeout:
-      connect: 5
-      send: 3600
-      read: 3600
 
-# 保留其他路由原16MiB上限；Responses按自己的32MiB配置处理，不读body。
+# Other routes keep 16 MiB; Responses may carry keeper-expanded history up to 64 MiB.
 global_rules:
   - id: non-responses-body-limit
     plugins:
@@ -49,7 +32,7 @@ global_rules:
         max_body_size: 16777216
         _meta:
           filter:
-            - ["route_id", "~=", "response-keeper-responses"]
+            - ["route_id", "~=", "responses-routing-selector"]
 
 routes:
   # 本组件存活检查不访问CPA；依赖故障由各组件自身检测，避免级联重启。
@@ -62,34 +45,27 @@ routes:
         status_code: 200
         content_type: application/json
         body: '{"status":"ok"}'
-  # 两种Responses入口统一经过keeper；此路由不读取或解析请求body。
-  - id: response-keeper-responses
-    uris:
-      - /v1/responses
-      - /rk/v1/responses
-    methods:
-      - GET
-      - POST
+  # Keeper is before Sub2API; HTTP model selection remains at this boundary.
+  - id: responses-routing-selector
+    uri: /v1/responses
+    methods: [POST]
     priority: 110
-    enable_websocket: true
     plugins:
       client-control:
-        max_body_size: 33554432
+        max_body_size: 67108864
       proxy-buffering:
         disable_proxy_buffering: true
-      proxy-rewrite:
-        uri: /v1/responses
-    upstream_id: response-keeper
-  - id: response-keeper-passthrough
-    uri: /rk/*
-    priority: 105
-    enable_websocket: true
-    plugins:
-      proxy-buffering:
-        disable_proxy_buffering: true
-      proxy-rewrite:
-        regex_uri: ["^/rk(/.*)$", "$1"]
-    upstream_id: self
+      serverless-pre-function:
+        phase: rewrite
+        functions:
+          - >-
+            return function(_, ctx)
+              local status, body, headers = require("routing_selector").run(_, ctx, "__CPA_API_KEY__")
+              if status then
+                return status, body, headers
+              end
+            end
+    upstream_id: cpa
   # 仅模型承载的HTTP推理入口做目录选路；优先级高于所有历史别名规则。
   # 原始model不改写；WS GET升级保持下方独立路径。
   - id: catalog-routing-selector

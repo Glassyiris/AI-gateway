@@ -30,6 +30,7 @@ local function run(options)
     local response_body = options.lookup_body or ('{"decision":"' .. (options.decision or "cpa") .. '","generation":7}')
     local log_lines = {}
     local fake = {
+        var = {uri = options.uri or "/v1/chat/completions"},
         req = {
             read_body = function() end,
             get_body_data = function() return body end,
@@ -200,6 +201,14 @@ test("stored decision is keyed by exact model ID", function()
     run({decision = "cpa", shared = shared, body = '{"model":"model-a"}'})
     local status, _, _, ctx = run({connect_error = true, shared = shared, body = '{"model":"model-b"}'})
     assert(status == 503 and ctx.upstream_id == nil)
+end)
+
+test("Responses admits expanded history without raising other request limits", function()
+    local body = string.rep(" ", 32 * 1024 * 1024 + 1) .. '{"model":"large-history"}'
+    local status, _, _, ctx, calls = run({body = body, uri = "/v1/responses"})
+    assert(status == nil and ctx.upstream_id == "cpa" and #calls == 1)
+    local rejected, _, _, rejected_ctx, rejected_calls = run({body = body, uri = "/v1/chat/completions"})
+    assert(rejected == 400 and rejected_ctx.upstream_id == nil and #rejected_calls == 0)
 end)
 
 print("PASS all " .. total .. " routing selector checks")

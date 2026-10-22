@@ -499,6 +499,25 @@ services:
       retries: 3
       start_period: 20s
 
+  # Operator bypasses public filtering, not the shared API authentication chain.
+  operator-host-netns:
+    <<: *netns-owner
+    ports:
+      - "${OPERATOR_BIND_ADDRESS:-127.0.0.1}:${OPERATOR_PORT:-8087}:8080"
+    networks:
+      operator-host-source:
+        ipv4_address: 172.30.72.2
+      host-operator-target:
+        ipv4_address: 172.30.73.3
+
+  operator-host-relay:
+    <<: *socat-relay
+    network_mode: service:operator-host-netns
+    command: ["TCP4-LISTEN:8080,bind=172.30.72.2,reuseaddr,fork", "TCP4:172.30.73.2:8080,connect-timeout=10"]
+    depends_on:
+      operator-host-netns: {condition: service_started, restart: true}
+      ai-sse-keepalive-proxy: {condition: service_started}
+
   ai-sse-keepalive-proxy-netns:
     <<: *netns-owner
     extra_hosts:
@@ -506,20 +525,22 @@ services:
     networks:
       apisix-ai-sse-target:
         ipv4_address: 172.30.10.2
+      host-operator-target:
+        ipv4_address: 172.30.73.2
       ai-sse-sub2api-source:
         ipv4_address: 172.30.25.2
 
   ai-sse-keepalive-proxy:
     build:
       context: ./middleware/ai-sse-keepalive-proxy
-    image: ${AI_SSE_KEEPALIVE_PROXY_IMAGE:-ghcr.io/xz-dev/ai-sse-keepalive-proxy:639eca292db8ba056b2a2e339209b3326cf77683}
+    image: ${AI_SSE_KEEPALIVE_PROXY_IMAGE:-ghcr.io/xz-dev/ai-sse-keepalive-proxy:1c489390927a986b7aacd3ebdfef3ea33f51d15d@sha256:bc5e360f98a9c71766bef26fbd67d88e93a2e93b372fcd9e5245788475d336f3}
     pull_policy: build
     user: "65534:65534"
     network_mode: service:ai-sse-keepalive-proxy-netns
     restart: unless-stopped
     depends_on:
       ai-sse-keepalive-proxy-netns: {condition: service_started, restart: true}
-      ai-sse-sub2api-relay: {condition: service_started, restart: true}
+      openai-api-cache-keeper: {condition: service_healthy, restart: true}
     pids_limit: 128
     mem_limit: 128m
     cpus: 0.5
@@ -528,11 +549,15 @@ services:
     logging: *default-logging
     security_opt: [no-new-privileges:true]
     environment:
-      UPSTREAM_URL: http://sub2api-ai-sse-relay:8080
+      UPSTREAM_URL: http://127.0.0.1:8085
       LISTEN_ADDR: :8080
       HEADER_WAIT: ${AI_SSE_KEEPALIVE_PROXY_HEADER_WAIT:-2s}
       IDLE_INTERVAL: ${AI_SSE_KEEPALIVE_PROXY_IDLE_INTERVAL:-15s}
-      MAX_INSPECT_BODY_BYTES: ${AI_SSE_KEEPALIVE_PROXY_MAX_INSPECT_BODY_BYTES:-16777216}
+      # Inspection buffers whole bodies in memory; 8 MiB plus a soft heap
+      # limit keeps concurrent large-history turns inside mem_limit 128m.
+      # Larger bodies pass through without keepalive heartbeats.
+      GOMEMLIMIT: ${AI_SSE_KEEPALIVE_PROXY_GOMEMLIMIT:-96MiB}
+      MAX_INSPECT_BODY_BYTES: ${AI_SSE_KEEPALIVE_PROXY_MAX_INSPECT_BODY_BYTES:-8388608}
       REQUIRE_NO_DEFAULT_ROUTE: "true"
       WS_PING_INTERVAL: ${AI_SSE_KEEPALIVE_PROXY_WS_PING_INTERVAL:-0s}
       WS_PING_TIMEOUT: ${AI_SSE_KEEPALIVE_PROXY_WS_PING_TIMEOUT:-5s}
@@ -651,41 +676,39 @@ services:
       retries: 3
       start_period: 20s
 
-  # 承接全部Responses（/v1/responses与/rk/v1/responses）；按模型直连CPA或AISIX，不再回环apisix-models:9080。
-  response-keeper:
+  # Shared cache owner before Sub2API; it does not select CPA/AISIX models.
+  openai-api-cache-keeper:
     build:
-      context: ./middleware/response-keeper
-    image: ${RESPONSE_KEEPER_IMAGE:-ghcr.io/xz-dev/response-keeper:df45c7fdd4e4ceeead26ff7b1008251737d4e86a@sha256:badb1a6c74e75341842774293b82361c6ea6c1d9cf153cbc73fde007098f386c}
+      context: ./middleware/openai-api-cache-keeper
+    image: ${OPENAI_API_CACHE_KEEPER_IMAGE:-ghcr.io/xz-dev/openai-api-cache-keeper:c667c9631737e79c679244b3257102b370b92b0e@sha256:84d49d694002cbe5fc617254982d4886d467cec7bf24b3cf52633cddc46293e2}
     pull_policy: build
     user: "65534:65534"
-    network_mode: service:apisix-models-netns
+    network_mode: service:ai-sse-keepalive-proxy-netns
     restart: unless-stopped
     depends_on:
-      apisix-models-netns: {condition: service_started, restart: true}
+      ai-sse-keepalive-proxy-netns: {condition: service_started, restart: true}
+      ai-sse-sub2api-relay: {condition: service_started, restart: true}
     pids_limit: 64
     mem_limit: 384m
+    memswap_limit: 384m
     cpus: 0.5
     read_only: true
     cap_drop: [ALL]
     logging: *default-logging
     security_opt: [no-new-privileges:true]
     volumes:
-      # Disposable cache on a real disk volume, never tmpfs; restart persistence is not required.
-      - response-keeper-cache:/var/tmp/response-keeper
+      # Disposable cache on a real disk volume, never tmpfs.
+      - openai-api-cache-keeper-cache:/var/tmp/openai-api-cache-keeper
     environment:
-      # 每轮按routing-index选CPA或AISIX；CPA用服务密钥，AISIX保留调用方凭证。
-      ROUTING_INDEX_URL: http://models-enricher:8090/routing-index
-      UPSTREAM_CPA_URL: http://cpa:8317
-      UPSTREAM_AISIX_URL: http://aisix:3000
-      CPA_API_KEY: ${CPA_API_KEY:?Set CPA_API_KEY in .env}
+      UPSTREAM_URL: http://sub2api-ai-sse-relay:8080
       LISTEN_ADDR: 127.0.0.1:8085
-      STORE_DIR: /var/tmp/response-keeper
-      GOMEMLIMIT: ${RESPONSE_KEEPER_GOMEMLIMIT:-256MiB}
-      STORE_TTL: ${RESPONSE_KEEPER_STORE_TTL:-10m}
-      STORE_MAX_BYTES: ${RESPONSE_KEEPER_STORE_MAX_BYTES:-209715200}
+      STORE_DIR: /var/tmp/openai-api-cache-keeper
+      GOMEMLIMIT: ${OPENAI_API_CACHE_KEEPER_GOMEMLIMIT:-256MiB}
+      STORE_TTL: ${OPENAI_API_CACHE_KEEPER_STORE_TTL:-10m}
+      STORE_MAX_BYTES: ${OPENAI_API_CACHE_KEEPER_STORE_MAX_BYTES:-209715200}
       REQUIRE_NO_DEFAULT_ROUTE: "true"
     healthcheck:
-      test: [CMD, /response-keeper, healthcheck]
+      test: [CMD, /openai-api-cache-keeper, healthcheck]
       interval: 30s
       timeout: 3s
       retries: 3
@@ -1025,7 +1048,7 @@ services:
         gw_priority: 1
 
 volumes:
-  response-keeper-cache: {}
+  openai-api-cache-keeper-cache: {}
   models-enricher-cache: {}
 
 networks:
@@ -1118,6 +1141,12 @@ networks:
   sub2api-squid-target:
     internal: true
     ipam: {config: [{subnet: 172.30.20.0/29}]}
+  # 21/22 are reserved by the production provider-sidecar overlay.
+  operator-host-source:
+    ipam: {config: [{subnet: 172.30.72.0/29}]}
+  host-operator-target:
+    internal: true
+    ipam: {config: [{subnet: 172.30.73.0/29}]}
   ai-sse-sub2api-source:
     internal: true
     ipam: {config: [{subnet: 172.30.25.0/29}]}

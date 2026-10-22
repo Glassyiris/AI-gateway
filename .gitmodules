@@ -1,6 +1,6 @@
 [submodule "middleware/ai-sse-keepalive-proxy"]
 	path = middleware/ai-sse-keepalive-proxy
 	url = https://github.com/xz-dev/ai-sse-keepalive-proxy.git
-[submodule "middleware/response-keeper"]
-	path = middleware/response-keeper
-	url = https://github.com/xz-dev/response-keeper.git
+[submodule "middleware/openai-api-cache-keeper"]
+	path = middleware/openai-api-cache-keeper
+	url = https://github.com/xz-dev/openai-api-cache-keeper.git

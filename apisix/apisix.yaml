@@ -153,6 +153,7 @@ routes:
       - /v1/usage
       - /v1/live/*
       - /v1/responses
+      - /v1/responses/*
       - /v1/images/tasks/*
       - /v1/images/batches
       - /v1/images/batches/*
@@ -163,7 +164,7 @@ routes:
     methods:
       - GET
     vars:
-      - [uri, "~~", '^/v1/(?:sub2api/billing|usage|live/[^/]+|responses|images/tasks/[^/]+|images/batches(?:/[^/]+(?:/items(?:/[^/]+/content)?|/download)?)?|videos/(?:[^/]+(?:/content)?|(?:generations|edits|extensions)/[^/]+(?:/content)?)|custom-voices(?:/[^/]+(?:/audio)?)?|realtime)$']
+      - [uri, "~~", '^/v1/(?:sub2api/billing|usage|live/[^/]+|responses(?:/[^/]+)?|images/tasks/[^/]+|images/batches(?:/[^/]+(?:/items(?:/[^/]+/content)?|/download)?)?|videos/(?:[^/]+(?:/content)?|(?:generations|edits|extensions)/[^/]+(?:/content)?)|custom-voices(?:/[^/]+(?:/audio)?)?|realtime)$']
     enable_websocket: true
     upstream_id: sub2api
     plugin_config_id: apisix-native-upstream-404
@@ -344,12 +345,13 @@ routes:
   - id: ai-api-root-compatible-get
     uris:
       - /responses
+      - /responses/*
       - /images/tasks/*
       - /videos/*
     methods:
       - GET
     vars:
-      - [uri, "~~", '^(?:/responses|/images/tasks/[^/]+|/videos/(?:[^/]+(?:/content)?|(?:generations|edits|extensions)/[^/]+(?:/content)?))$']
+      - [uri, "~~", '^(?:/responses(?:/[^/]+)?|/images/tasks/[^/]+|/videos/(?:[^/]+(?:/content)?|(?:generations|edits|extensions)/[^/]+(?:/content)?))$']
     enable_websocket: true
     upstream_id: sub2api
     plugin_config_id: apisix-native-upstream-404

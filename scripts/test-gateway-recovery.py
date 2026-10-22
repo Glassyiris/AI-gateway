@@ -81,21 +81,21 @@ class RecoveryTests(unittest.TestCase):
         self.assertFalse(recovery.probe_http(self.port, "/healthz", 200, timeout=0.03)["ok"])
 
     def test_actual_compose_health_command_rejects_5xx(self):
-        for filename in ("compose.yaml", "ansible/private-config/compose.yaml"):
-            text = (ROOT / filename).read_text()
-            block = text.split("\n  apisix-models:\n", 1)[1].split("\n  response-keeper:\n", 1)[0]
-            command = json.loads(re.search(r'test: \[CMD, /bin/bash, -ec, ("[^\n]+")\]', block)[1])
-            command = command.replace("$$", "$")  # Compose expands the escaped shell variable.
-            command = command.replace("127.0.0.1/9080", "127.0.0.1/" + str(self.port))
-            for status in (200, 502, 503):
-                Handler.status = status
-                with self.subTest(filename=filename, status=status):
-                    result = subprocess.run(["bash", "-ec", command], capture_output=True, timeout=2)
-                    self.assertEqual(result.returncode == 0, status == 200)
-            Handler.delay = 0.2
-            with self.assertRaises(subprocess.TimeoutExpired):
-                subprocess.run(["bash", "-ec", command], capture_output=True, timeout=0.03)
-            Handler.delay = 0
+        # Private production overrides are not repository test fixtures.
+        text = (ROOT / "compose.yaml").read_text()
+        block = text.split("\n  apisix-models:\n", 1)[1].split("\n  openai-api-cache-keeper:\n", 1)[0]
+        command = json.loads(re.search(r'test: \[CMD, /bin/bash, -ec, ("[^\n]+")\]', block)[1])
+        command = command.replace("$$", "$")  # Compose expands the escaped shell variable.
+        command = command.replace("127.0.0.1/9080", "127.0.0.1/" + str(self.port))
+        for status in (200, 502, 503):
+            Handler.status = status
+            with self.subTest(status=status):
+                result = subprocess.run(["bash", "-ec", command], capture_output=True, timeout=2)
+                self.assertEqual(result.returncode == 0, status == 200)
+        Handler.delay = 0.2
+        with self.assertRaises(subprocess.TimeoutExpired):
+            subprocess.run(["bash", "-ec", command], capture_output=True, timeout=0.03)
+        Handler.delay = 0
 
     def test_failure_threshold_grace_reset_cooldown_and_hourly_budget(self):
         state = {}
@@ -160,6 +160,32 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(state["cli-proxy-api"]["restarts"], [1000])
         self.assertIn("restart_outcome_unknown_cooldown", output.getvalue())
         self.assertNotIn("offline-sensitive-fixture", output.getvalue())
+
+    def test_catalog_key_comes_from_apisix_models_not_cache_keeper(self):
+        started = "1970-01-01T00:00:01+00:00"
+        containers = [{"Id": service, "Name": f"/ai-gateway-{service}-1", "Config": {
+            "Labels": {"com.docker.compose.project": "ai-gateway", "com.docker.compose.service": service},
+            "Env": ["CPA_API_KEY=models-key"] if service == "apisix-models" else []},
+            "State": {"Running": True, "Pid": 123, "StartedAt": started}}
+            for service in recovery.CHECKS]
+        keys = []
+
+        def probe(pid, request):
+            if request.get("catalog"):
+                keys.append(request.get("key"))
+            return {"ok": True}
+
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(recovery, "STATE_DIR", Path(directory)), \
+                mock.patch.object(recovery, "inspect", return_value=containers), \
+                mock.patch.object(recovery, "namespace_probe", side_effect=probe), \
+                mock.patch.object(recovery, "docker_api", return_value=[]), \
+                mock.patch.object(recovery.time, "time", return_value=1000), \
+                contextlib.redirect_stdout(io.StringIO()):
+            recovery.run(False)
+        self.assertEqual(keys, ["models-key"])
+        self.assertIn("openai-api-cache-keeper", recovery.CHECKS)
+        self.assertNotIn("response-keeper", recovery.CHECKS)
 
     def test_pprof_capture_streams_bounded_files_and_keeps_recent(self):
         Handler.body = b"heap profile\n"

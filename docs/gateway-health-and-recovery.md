@@ -14,13 +14,13 @@ Health has three separate meanings:
 | --- | --- | --- |
 | cli-proxy-api | Authenticated `GET /v1/models`, HTTP 200 and a JSON `data` array | CPA can serve its local catalog read path |
 | sub2api | `GET /health`, HTTP 200 | Application health endpoint; dependency semantics belong to Sub2API |
-| response-keeper | `GET /healthz`, HTTP 200 | Keeper HTTP liveness, not proof of cache writes or hits |
+| openai-api-cache-keeper | `GET /healthz`, HTTP 200 | Keeper HTTP liveness, not proof of cache writes, hits or replay |
 | models-enricher | `GET /healthz`, HTTP 200 | Enricher local liveness |
 | ai-sse-keepalive-proxy | `GET /healthz`, HTTP 200 | Keepalive proxy local liveness |
 | apisix | Local `GET /v1/models`, expected HTTP 404 | APISIX's local rejection route responds; no upstream request |
 | apisix-models | Local `GET /healthz`, HTTP 200 | APISIX's explicit local health route responds; no CPA request |
 
-The CPA key comes from the existing keeper container environment. It remains in process memory, not arguments or logs. A missing key or HTTP 401/403 is **unknown**, not a restart decision. An inaccessible namespace is also unknown. Deployment refuses unknown or failed probes.
+The CPA key comes from the existing `apisix-models` container environment; the front keeper does not hold it. It remains in process memory, not arguments or logs. A missing key or HTTP 401/403 is **unknown**, not a restart decision. An inaccessible namespace is also unknown. Deployment refuses unknown or failed probes.
 
 Recovery policy:
 
