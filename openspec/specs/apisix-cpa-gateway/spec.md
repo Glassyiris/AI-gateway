@@ -2,41 +2,9 @@
 
 ## Purpose
 
-A new dedicated APISIX instance inserted into the Sub2API → CPA path, transparently carrying all CPA-bound traffic (HTTP, SSE, WebSocket) while splitting Codex models-manifest requests to the models-enricher sidecar. The existing public-ingress APISIX instance is untouched.
+A new dedicated APISIX instance inserted into the Sub2API → CPA path. It routes classified HTTP inference by the slash rule (ID with `/` → CPA, otherwise → AISIX), passes direct WebSocket upgrades to CPA, and splits Codex models-manifest requests to the models-enricher sidecar. The existing public-ingress APISIX instance is untouched.
 
 ## Requirements
-
-### Requirement: Transparent CPA passthrough
-
-The internal instance SHALL forward requests according to catalog-based backend selection on the classified model-bearing JSON HTTP inference paths (at minimum `POST /v1/responses` and `POST /v1/chat/completions`, including Sub2API `http_bridge` HTTP output): a request whose model ID is in the CPA raw membership (including overlap with AISIX) goes to the CPA upstream without altering semantics, including SSE streaming; a request whose model ID is AISIX-only goes to the AISIX upstream. Classification SHALL happen before inference with no cross-backend retry. Where classification cannot produce a usable outcome the entrance SHALL fail explicitly (model-not-found only under authoritative absence; 503-class otherwise), never silently default to a backend. Requests outside the classified scope — including the legacy direct-WebSocket upgrade used by the Codex Responses transport and endpoints without a model-bearing JSON body — keep their existing forwarding behavior. Raw source discovery traffic never traverses this entrance; client catalog delivery through the entrance is retained.
-
-#### Scenario: Plain chat completion passes through
-- **WHEN** Sub2API sends `POST /v1/chat/completions` naming a model in the CPA raw membership
-- **THEN** the request reaches CPA and CPA's response body and status are returned unchanged
-
-#### Scenario: SSE streaming passes through
-- **WHEN** Sub2API sends a streaming `POST /v1/responses` request
-- **THEN** SSE chunks flow from the selected backend to Sub2API incrementally without full-response buffering
-
-#### Scenario: WebSocket passes through
-- **WHEN** Sub2API opens a WebSocket connection for the Codex Responses WS transport (`/v1/responses` upgrade)
-- **THEN** the upgrade and bidirectional frames pass through with the existing behavior for that transport, outside model classification, and the session behaves as a direct connection (APISIX does not terminate or interpret frames)
-
-#### Scenario: AISIX-only model forwarded to AISIX
-- **WHEN** a request on a classified path names a model absent from the CPA raw membership and present in the AISIX raw membership
-- **THEN** it is forwarded to the AISIX upstream once, with no CPA attempt
-
-#### Scenario: Chosen backend failure does not re-route
-- **WHEN** the selected backend returns 429/5xx, times out, or errors mid-stream
-- **THEN** the failure surfaces without any attempt on the other backend
-
-#### Scenario: Unclassifiable request fails honestly
-- **WHEN** no usable classification decision exists for the model ID on a classified path
-- **THEN** the entrance returns the mapped explicit error (503-class, or model-not-found only under authoritative absence) without forwarding
-
-#### Scenario: Malformed classified payload does not fall through
-- **WHEN** a classified path receives a malformed body or one without an extractable model ID
-- **THEN** the entrance returns an explicit protocol-shaped error without forwarding to any backend
 
 ### Requirement: Codex manifest route split
 
@@ -78,3 +46,32 @@ The design SHALL keep APISIX-native routing capabilities (ai-proxy-multi fallbac
 
 - **WHEN** future work adds model routing
 - **THEN** it can use built-in `fallback_strategy`, `max_retries`, upstream `type`/`hash_on`, and health-check configuration on this dedicated instance
+
+### Requirement: Slash-rule passthrough to CPA or AISIX
+
+The internal instance SHALL forward classified model-bearing JSON HTTP inference requests (at minimum `POST /v1/responses` and `POST /v1/chat/completions`, including Sub2API `http_bridge` output) by the model ID slash rule: an ID containing `/` goes to the CPA upstream with the CPA service credential, and every other ID goes to the AISIX upstream with the caller credential. Request semantics, including SSE streaming, SHALL be preserved. Classification SHALL happen before inference with no cross-backend retry. Malformed classified payloads SHALL fail explicitly without forwarding. Requests outside the classified scope, including direct WebSocket upgrades and endpoints without a model-bearing JSON body, keep forwarding to CPA. Raw source discovery traffic never traverses this entrance; client catalog delivery through the entrance is retained.
+
+#### Scenario: Slash ID chat completion reaches CPA
+- **WHEN** Sub2API sends `POST /v1/chat/completions` naming an ID that contains `/`
+- **THEN** the request reaches CPA and CPA's response body and status are returned unchanged
+
+#### Scenario: Bare ID reaches AISIX
+- **WHEN** a classified request names an ID without `/`
+- **THEN** it is forwarded to the AISIX upstream once, with no CPA attempt
+
+#### Scenario: SSE streaming passes through
+- **WHEN** Sub2API sends a streaming `POST /v1/responses` request
+- **THEN** SSE chunks flow from the selected backend to Sub2API incrementally without full-response buffering
+
+#### Scenario: Direct WebSocket passes through to CPA
+- **WHEN** a client opens a direct WebSocket upgrade on `/v1/responses`
+- **THEN** the upgrade and frames pass through to CPA without classification
+- **AND** bare IDs on this path are not supported; Sub2API accounts use `http_bridge` instead
+
+#### Scenario: Chosen backend failure does not re-route
+- **WHEN** the selected backend returns 429/5xx, times out, or errors mid-stream
+- **THEN** the failure surfaces without any attempt on the other backend
+
+#### Scenario: Malformed classified payload does not fall through
+- **WHEN** a classified path receives a malformed body or one without an extractable model ID
+- **THEN** the entrance returns an explicit protocol-shaped error without forwarding to any backend

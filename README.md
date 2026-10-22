@@ -106,7 +106,7 @@ cd "$HOME/AI-gateway"
 
 1. Replace `ADMIN_EMAIL=admin@example.invalid` in `.env`.
 2. In Cloudflare Dashboard, create a remotely managed Tunnel and replace `CLOUDFLARED_TUNNEL_TOKEN` in `.env` using an editor that does not expose it in shell history. Keep `.env` mode `0600`.
-3. Replace the example model entries in private `aisix/resources.yaml` with the approved concrete CPA targets and logical routes. Keep one CPA provider key, reuse each concrete target as one direct model, and give Sub2API only the logical IDs it is authorized to expose. Configure CPA-backed Sub2API accounts with Base URL `http://aisix:3000/v1`, the private `sub2api` caller key from `aisix/caller-keys.json`, boolean pool mode, bounded retry, and `http_bridge`. Never print either caller key.
+3. Replace the example model entries in private `aisix/resources.yaml` with the approved concrete CPA targets and logical routes. Keep one CPA provider key, reuse each concrete target as one direct model, and give Sub2API only the logical IDs it is authorized to expose. Configure CPA-backed Sub2API accounts with Base URL `http://cli-proxy-api:8317/v1` (the relay to the inner models gateway), the private `sub2api` caller key from `aisix/caller-keys.json`, boolean pool mode, bounded retry, and `http_bridge`. Never print either caller key.
 4. Review the built-in control-plane rules in `data/egress-proxy/policy.json`, add only the deployment-specific provider or optional-feature destinations you need, then render it. This ignored runtime file is created only when absent, so repository upgrades never merge into or replace the user's allowlist:
 
    ```bash
@@ -219,10 +219,12 @@ Add provider accounts to CPA, define their concrete IDs and logical routes in pr
 
 | Field | Value |
 | --- | --- |
-| Base URL | `http://aisix:3000/v1` |
+| Base URL | `http://cli-proxy-api:8317/v1` (never `/rk/v1`) |
 | API key | private `sub2api` value from `aisix/caller-keys.json` |
 | Pool mode | boolean `true` |
-| WebSocket mode | `http_bridge` |
+| WebSocket mode | `http_bridge` (every OpenAI API-key account) |
+
+The inner gateway sends model IDs containing `/` to CPA and all other IDs to AISIX. WebSocket turns are classified only because `http_bridge` turns them into `POST /v1/responses`. See [docs/model-routing.md](docs/model-routing.md) before changing routes, keepers or account settings.
 
 Leave that internal AISIX account without a Sub2API proxy. For every Sub2API account whose Base URL is on the Internet, explicitly assign an active `http` proxy record pointing to `sub2api-egress-relay:3128` with fallback mode `none`; Sub2API's account transports do not consistently inherit proxy environment variables.
 
@@ -276,7 +278,7 @@ Keeper uses standard Responses paths only; no `/rk` alias, prefix stripping or p
 - **Limits.** Keeper uses 384 MiB, 0.5 CPU, 64 PID and no swap; payload/history/event storage shares a 200 MiB disk budget. Keepalive retains 128 MiB, with `GOMEMLIMIT=96MiB` and an 8 MiB inspection limit. Larger bodies pass through without keepalive heartbeats. Expanded internal Responses history is bounded at 64 MiB; other inner routes retain 16 MiB.
 - **Operator.** Reusable Compose defines a loopback-only `:8087` entrance to the same keepalive namespace, bypassing APISIX filters but not authentication. A specific Tailscale binding needs an explicit ACL. The urgent production cutover deferred this new entrance to avoid recreating namespaces; that is not two-entrance acceptance.
 
-Pin both GHCR images by commit and digest. Snapshot the entire old Compose, private override/environment, both APISIX configurations and old image identities before switching. Stop the old inner keeper; never run two history owners on the request path or share their volumes. Preserve unrelated production service settings. The legacy Ansible `deploy-response-keeper`, `deploy-responses-path` and `restart-response-keeper` tags fail during preflight: they describe the retired topology. [Scoped Ansible deployment, keeper-only restart and exact-image rollback](ansible/README.md#standard-cache-transaction-safety) operate only on the already-installed primary chain. They require an approved, state-bound plan; they do not install Operator/network changes or replace unrelated production settings. Deployment and rollback move the inner routing selector and its 64 MiB nginx setting together. Offline tool verification is not a production rollback drill.
+Pin both GHCR images by commit and digest. Snapshot the entire old Compose, private override/environment, both APISIX configurations and old image identities before switching. Stop the old inner keeper; never run two history owners on the request path or share their volumes. Removing a component also removes its WebSocket handling and path aliases: migrate Sub2API account `base_url` and WebSocket mode in the same rollout ([checklist](docs/model-routing.md#checklist-before-pushing-or-deploying)). Preserve unrelated production service settings. The legacy Ansible `deploy-response-keeper`, `deploy-responses-path` and `restart-response-keeper` tags fail during preflight: they describe the retired topology. [Scoped Ansible deployment, keeper-only restart and exact-image rollback](ansible/README.md#standard-cache-transaction-safety) operate only on the already-installed primary chain. They require an approved, state-bound plan; they do not install Operator/network changes or replace unrelated production settings. Deployment and rollback move the inner routing selector and its 64 MiB nginx setting together. Offline tool verification is not a production rollback drill.
 
 ### Optional provider-sidecar
 
@@ -394,9 +396,9 @@ APISIX does **not** cache the final enriched catalog. Go caches successful final
 
 Reads are split by purpose. **Metadata inputs** (models.dev, modelparams.dev, channel model lists and Ollama `/api/show` via `api-call`) are persisted in a bbolt database on the dedicated named volume `models-enricher-cache` (`/var/cache/models-enricher/inputs.db`, `CACHE_DIR`), so they survive restart and container recreation. After any failed metadata refresh — timeout, network error, any HTTP status including 401/403, invalid JSON or failed validation — the last validated success is reused without an age limit; failures never replace or delete it, and a valid empty response replaces it. A stage whose deadline is already exhausted also uses the retained input. The persistent cache holds at most **100,000,000 bytes of response payload** and evicts whole entries **FIFO** by first admission (reads and successful replacements do not reorder; no entry-count limit); bbolt indexes, free pages and file high-water growth are outside that limit, so the file can be larger than 100 MB. An eviction removes fallback for that input until it is fetched again. **Authority reads** (CPA native inventory, management discovery/identity, AISIX membership) keep their earlier policy — stale only on network errors, timeouts or 502/503/504, invalidated on 401/403 or invalid bodies — and stay in a 32 MiB process-local FIFO memory cache; they are never written to disk, because management responses can contain credentials. Persisted metadata never grants catalog membership, entitlement or routing readiness: catalogs are always recomposed from the current CPA snapshot, so newly added CPA models appear during metadata outages and removed models do not return. The volume is private to the enricher (0700/0600, owned by 65532); deleting it is a deliberate destructive action. The container keeps its 64MiB `/tmp` tmpfs, 384 MiB cgroup limit and `GOMEMLIMIT=288MiB`. The client-facing CPA key comes from `CPA_CLIENT_KEY` (defaults to `CPA_API_KEY`).
 
-AISIX owns HTTP/SSE alias routing over concrete CPA targets. Sub2API owns WebSocket ingress and reconstructs explicit full-history requests through `http_bridge`; the internal models gateway passes authenticated downstream WebSocket traffic directly to CPA without a separate alias-rewrite sidecar.
+AISIX owns alias routing over concrete CPA targets. Sub2API owns WebSocket ingress and turns each turn into an HTTP request through `http_bridge`. The internal models gateway routes model IDs containing `/` to CPA and all others to AISIX ([docs/model-routing.md](docs/model-routing.md)); direct WebSocket upgrades bypass that selector and reach CPA.
 
-Cutover: configure every CPA-backed Sub2API account for `http://aisix:3000/v1` with an AISIX caller key. CPA model-router is not a standby or rollback path.
+Cutover: configure every CPA-backed Sub2API account for `http://cli-proxy-api:8317/v1` with an AISIX caller key and `http_bridge`. CPA model-router is not a standby or rollback path.
 
 ### Front-door model catalog intersection (model-catalog-sidecar)
 

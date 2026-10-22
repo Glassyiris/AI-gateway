@@ -1,0 +1,87 @@
+# Model routing and Sub2API WebSocket bridge
+
+Read this before you change `apisix-models/`, Sub2API account settings, or the keeper chain.
+
+## The rule
+
+The inner models gateway (`apisix-models`) picks the backend from the literal `model` string:
+
+| Model ID | Backend | Credential sent upstream |
+| --- | --- | --- |
+| contains `/` anywhere (`xl/claude-opus-5-5`, `/`, `provider/`) | CPA | CPA service key (`CPA_API_KEY`) |
+| no `/` (`claude-opus-5-5`, `gpt-6.1-sol`, any unknown name) | AISIX | caller key, unchanged |
+
+- No catalog lookup, provider check or cache. Unknown IDs are forwarded, and the backend returns the error.
+- One function implements it: `apisix-models/routing_selector.lua`, `document.model:find("/", 1, true)`.
+- `apisix-models/routing_selector_test.lua` enforces it. `scripts/validate.sh` runs the test in CI.
+
+Do not reintroduce `/routing-index` lookups, last-known-good caches or a "registered provider" check.
+
+## Topology
+
+```text
+Pi ─► public APISIX ─► keepalive ─► openai-api-cache-keeper ─► Sub2API
+Sub2API account base_url http://cli-proxy-api:8317/v1
+   └─► sub2api-cpa-relay ─► apisix-models :9080
+          POST /v1/responses, /v1/chat/completions ─► routing_selector ─► AISIX | CPA
+          everything else, including WebSocket GET  ─► CPA (unclassified)
+```
+
+`cli-proxy-api:8317` on the Sub2API network is the relay to `apisix-models`, not CPA itself.
+
+## Why WebSocket must be bridged
+
+APISIX reads the model only from an HTTP request body. A WebSocket upgrade is a body-less GET, and the model arrives later inside frames that APISIX passes through without inspection. A direct WebSocket therefore falls to `catch-all` and reaches CPA, which only knows slash IDs. Bare IDs then fail with `Connection error`.
+
+Sub2API's existing `http_bridge` mode turns each client WebSocket turn into `POST /v1/responses`, which the selector can classify.
+
+## Sub2API account contract
+
+Every OpenAI API-key account in Sub2API:
+
+| Field | Required value |
+| --- | --- |
+| `credentials.base_url` | `http://cli-proxy-api:8317/v1` (third-party upstreams such as SiliconFlow keep their own URL) |
+| `extra.openai_apikey_responses_websockets_v2_mode` | `http_bridge` |
+| API key | private `sub2api` caller key from `aisix/caller-keys.json` (CPA-backed accounts) |
+
+Never use `/rk/v1`; that alias was removed with the old keeper and now returns 404. Never set `ctx_pool` or `passthrough` on these accounts.
+
+Read-only check on the production host:
+
+```sh
+docker exec -i ai-gateway-postgres-1 psql -XAtq -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c \
+ "SELECT id, name, credentials->>'base_url', extra->>'openai_apikey_responses_websockets_v2_mode'
+    FROM accounts WHERE deleted_at IS NULL AND platform='openai' AND type='apikey' ORDER BY id;"
+```
+
+Every row must show `http_bridge`. No row may contain `/rk/`. Change accounts only through the Sub2API admin API, never by direct SQL writes.
+
+## Architecture boundary
+
+Do not implement gateway requirements by modifying Sub2API code. Routing, aggregation and WebSocket handling belong to APISIX, AISIX and keeper layers, or to Sub2API's existing configuration. Patch Sub2API only for a genuine Sub2API bug that reproduces with Sub2API alone, with a minimal fix and explicit operator approval.
+
+Known Sub2API bridge limitation, not yet fixed: on one WebSocket, a turn that sends `previous_response_id` plus only new input loses the earlier assistant message. A parent that the bridge cannot resolve is silently dropped. Pi sends full history each turn and is not affected. Clients relying on `previous_response_id` deltas are.
+
+## Incident 2026-10-22: how this broke
+
+1. Before 08:53 UTC the inner APISIX sent all `/v1/responses` traffic (GET and POST) to the old `response-keeper`, which read the model of every WebSocket turn and chose CPA or AISIX.
+2. Commit `b112be3` moved the cache keeper in front of Sub2API and stopped the old keeper. The replacement inner route was POST-only. The keeper's WebSocket classification was dropped with no replacement.
+3. Sub2API accounts still used `ctx_pool`, which forwards the WebSocket. Upgrades fell to `catch-all` and reached CPA. Every bare aggregate ID failed over WebSocket.
+4. Seven accounts still had `base_url …/rk/v1`. The cutover removed `/rk`, so those accounts returned 404 for everything.
+5. Repair, 14:29–14:30 UTC, no container restart: the slash-rule selector, `http_bridge` on all accounts, and `/rk/v1 → /v1`.
+
+## Checklist before pushing or deploying
+
+- [ ] Changing a keeper, selector or route? List every responsibility of the component you remove (HTTP *and* WebSocket) and show where each one lives afterwards.
+- [ ] Removing a path alias (`/rk`, …)? Find every Sub2API account and client still using it, and migrate them in the same rollout.
+- [ ] Sub2API account settings are database state; Git does not track them. Run the read-only check above before and after each cutover.
+- [ ] `scripts/validate.sh` passes, including `routing_selector_test.lua`.
+- [ ] Production `apisix-models/routing_selector.lua` hash equals the repository file before you deploy the repository. A deploy from a stale checkout silently reverts the live rule.
+- [ ] After deploy, test with the installed Pi over WebSocket: one bare ID (`claude-opus-5-5`), one slash ID (`xl/claude-opus-5-5`), and a two-turn recall. Confirm in AISIX logs that only the bare ID arrived there. HTTP 101 or a single `OK` alone is not proof.
+
+## Known production drift (2026-10-22)
+
+- Production `apisix-models/apisix.yaml` has an extra `responses-websocket-auth` route (direct WebSocket GET to CPA with caller-key check). It is not in this repository, and with `http_bridge` on every account Sub2API no longer uses it. Remove it from production or adopt it here; do not deploy the repository template over it unreviewed.
+- `config.yaml` still declares the `routing_lkg` shared dict. The selector no longer uses it.
+- `openspec/changes/stabilize-responses-path` describes the retired keeper topology and catalog lookup. Do not archive it as-is.
