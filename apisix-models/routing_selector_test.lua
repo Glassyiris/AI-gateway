@@ -9,61 +9,28 @@ local source = (arg[0]:match("^(.*)/") or ".") .. "/routing_selector.lua"
 local real_ngx = ngx
 local total = 0
 
--- Shared dict that persists across run() calls in one test, like the real
--- ngx.shared zone across requests in one worker.
-local function new_shared_dict()
-    local store = {}
-    return {
-        get = function(_, key) return store[key] end,
-        set = function(_, key, value, _) store[key] = value return true end,
-        delete = function(_, key) store[key] = nil return true end,
-        _store = store,
-    }
-end
-
 local function run(options)
     options = options or {}
-    local calls = {}
-    local headers = {Authorization = options.authorization or "Bearer caller", session_id = "session"}
-    local body = options.body or '{"model":"axis/model + exact","stream":true}'
+    local calls = {index = 0, cache = 0}
+    local headers = {Authorization = "Bearer caller", session_id = "session"}
+    local body = options.body or json.encode({model = options.model or "unknown-bare-id", stream = true})
     local rewritten
-    local response_body = options.lookup_body or ('{"decision":"' .. (options.decision or "cpa") .. '","generation":7}')
-    local log_lines = {}
-    local fake = {
-        var = {uri = options.uri or "/v1/chat/completions"},
-        req = {
-            read_body = function() end,
-            get_body_data = function() return body end,
-            get_body_file = function() return nil end,
-            set_body_data = function(value) rewritten = value end,
-            set_header = function(name, value) headers[name] = value end,
-        },
-        escape_uri = function(value)
-            return (value:gsub("%%", "%%25"):gsub("/", "%%2F"):gsub(" ", "%%20"):gsub("%+", "%%2B"))
-        end,
-        log = function(_, ...) log_lines[#log_lines + 1] = table.concat({...}) end,
-        WARN = 5,
-        shared = options.shared and {routing_lkg = options.shared} or nil,
-    }
+    local response = '{"decision":"not_found","generation":7}'
     package.loaded["resty.http"] = {
         new = function()
+            calls.index = calls.index + 1
             return {
                 set_timeouts = function() end,
-                connect = function()
-                    if options.connect_error then return nil, "connect failed" end
-                    return true
-                end,
-                request = function(_, request)
-                    calls[#calls + 1] = request
-                    if options.request_error then return nil, "request failed" end
+                connect = function() return true end,
+                request = function()
                     local sent = false
                     return {
-                        status = options.lookup_status or 200,
-                        headers = { ["Content-Length"] = tostring(#response_body) },
+                        status = 200,
+                        headers = {["Content-Length"] = tostring(#response)},
                         body_reader = function()
                             if sent then return nil end
                             sent = true
-                            return response_body
+                            return response
                         end,
                     }
                 end,
@@ -72,13 +39,30 @@ local function run(options)
             }
         end,
     }
-    _G.ngx = fake
+    _G.ngx = {
+        var = {uri = options.uri or "/v1/responses"},
+        req = {
+            read_body = function() end,
+            get_body_data = function() return body end,
+            get_body_file = function() return nil end,
+            set_body_data = function(value) rewritten = value end,
+            set_header = function(name, value) headers[name] = value end,
+        },
+        escape_uri = function(value) return value end,
+        shared = {routing_lkg = {
+            get = function() calls.cache = calls.cache + 1 return options.stale_decision end,
+            set = function() calls.cache = calls.cache + 1 end,
+            delete = function() calls.cache = calls.cache + 1 end,
+        }},
+    }
     local module = dofile(source)
     local ctx = {}
-    local ok, status, result, response_headers = pcall(module.run, nil, ctx, "cpa-secret")
+    local key = options.cpa_key
+    if key == nil then key = "cpa-secret" end
+    local ok, status, result, response_headers = pcall(module.run, nil, ctx, key)
     _G.ngx = real_ngx
     assert(ok, status)
-    return status, result, response_headers, ctx, calls, headers, rewritten, log_lines
+    return status, result, response_headers, ctx, calls, headers, rewritten
 end
 
 local function test(name, fn)
@@ -87,128 +71,89 @@ local function test(name, fn)
     print("PASS " .. name)
 end
 
-test("CPA decision selects one upstream and injects only the CPA credential", function()
-    local status, _, _, ctx, calls, headers = run({decision = "cpa"})
-    assert(status == nil and ctx.upstream_id == "cpa")
-    assert(#calls == 1 and calls[1].method == "GET")
-    assert(calls[1].path == "/routing-index")
-    assert(calls[1].query == "model=axis%2Fmodel%20%2B%20exact")
-    assert(headers.Authorization == "Bearer cpa-secret")
-    assert(headers.session_id == "session")
+test("every bare ID reaches AISIX even when absent from the catalog", function()
+    for _, model in ipairs({"unknown-bare-id", "claude-opus-5-5", "gpt-6.1-sol", "model + exact"}) do
+        local status, _, _, ctx, calls, headers, rewritten = run({model = model})
+        assert(status == nil and ctx.upstream_id == "aisix", model .. " must reach AISIX, got " .. tostring(status))
+        assert(calls.index == 0 and calls.cache == 0)
+        assert(headers.Authorization == "Bearer caller" and headers.session_id == "session")
+        assert(rewritten == nil)
+    end
 end)
 
-test("AISIX decision preserves the caller credential and exact body", function()
-    local status, _, _, ctx, calls, headers, rewritten = run({decision = "aisix"})
-    assert(status == nil and ctx.upstream_id == "aisix" and #calls == 1)
-    assert(headers.Authorization == "Bearer caller")
-    assert(rewritten == nil)
+test("IDs containing a slash reach CPA without registration or catalog lookup", function()
+    for _, model in ipairs({"xl/claude-opus-5-5", "unknown-provider/unknown-model", "provider/nested/model", "provider/*"}) do
+        local status, _, _, ctx, calls, headers, rewritten = run({model = model})
+        assert(status == nil and ctx.upstream_id == "cpa", model)
+        assert(calls.index == 0 and calls.cache == 0)
+        assert(headers.Authorization == "Bearer cpa-secret" and headers.session_id == "session")
+        assert(rewritten == nil)
+    end
 end)
 
-test("not found and unavailable fail without an upstream", function()
-    local status, body, response_headers, ctx, calls = run({decision = "not_found"})
-    assert(status == 404 and body:find('"code":"model_not_found"', 1, true))
-    assert(not body:find("cpa-secret", 1, true) and not body:find("Bearer caller", 1, true) and not body:find("axis/model", 1, true))
-    assert(response_headers["Content-Type"] == "application/json" and ctx.upstream_id == nil and #calls == 1)
-    local unavailable_status, unavailable_body, _, unavailable_ctx, unavailable_calls = run({decision = "unavailable"})
-    assert(unavailable_status == 503 and unavailable_body:find('"code":"service_unavailable"', 1, true))
-    assert(unavailable_ctx.upstream_id == nil and #unavailable_calls == 1)
+test("any slash selects CPA even when either side is empty", function()
+    for _, model in ipairs({"/model", "provider/", "/", "//"}) do
+        local status, _, _, ctx, calls, headers = run({model = model})
+        assert(status == nil and ctx.upstream_id == "cpa", model)
+        assert(calls.index == 0 and calls.cache == 0)
+        assert(headers.Authorization == "Bearer cpa-secret")
+    end
 end)
 
-test("lookup failures never become not found or a backend selection", function()
-    for _, options in ipairs({
-        {connect_error = true},
-        {request_error = true},
-        {lookup_status = 500},
-        {lookup_body = '{"decision":"unknown","generation":7}'},
-        {lookup_body = '{"decision":"cpa"}'},
-        {lookup_body = string.rep("x", 1025)},
+test("stale catalog routing cannot override the literal slash rule", function()
+    for _, case in ipairs({
+        {model = "unknown-bare-id", stale_decision = "cpa", expected = "aisix"},
+        {model = "unknown/model", stale_decision = "aisix", expected = "cpa"},
     }) do
-        local status, body, _, ctx = run(options)
-        assert(status == 503 and body:find('"code":"service_unavailable"', 1, true))
-        assert(ctx.upstream_id == nil)
+        local status, _, _, ctx, calls = run(case)
+        assert(status == nil and ctx.upstream_id == case.expected)
+        assert(calls.index == 0 and calls.cache == 0)
     end
 end)
 
-test("malformed classified payloads do not perform a lookup", function()
-    for _, body in ipairs({"not-json", "[]", "{}", '{"model":""}', '{"model":42}'}) do
-        local status, result, _, ctx, calls = run({body = body})
+test("missing CPA credentials fail closed without changing AISIX authentication", function()
+    for _, key in ipairs({false, "", 42}) do
+        local status, result, _, ctx, _, headers = run({model = "provider/model", cpa_key = key})
+        assert(status == 503 and result:find('"code":"service_unavailable"', 1, true))
+        assert(ctx.upstream_id == nil and headers.Authorization == "Bearer caller")
+        local aisix_status, _, _, aisix_ctx = run({model = "bare-id", cpa_key = key})
+        assert(aisix_status == nil and aisix_ctx.upstream_id == "aisix")
+    end
+end)
+
+test("malformed or invalid models still fail before forwarding", function()
+    for _, body in ipairs({"not-json", "[]", "{}", '{"model":""}', '{"model":42}',
+        '{"model":"' .. string.rep("x", 1025) .. '"}'}) do
+        local status, result, response_headers, ctx, calls, headers = run({body = body})
         assert(status == 400 and result:find('"code":"invalid_request_error"', 1, true))
+        assert(response_headers["Content-Type"] == "application/json")
+        assert(ctx.upstream_id == nil and calls.index == 0 and calls.cache == 0)
+        assert(headers.Authorization == "Bearer caller")
         assert(not result:find("cpa-secret", 1, true) and not result:find("Bearer caller", 1, true))
-        assert(ctx.upstream_id == nil and #calls == 0)
     end
 end)
 
-test("existing prompt cache compatibility rewrite remains scoped", function()
-    local _, _, _, ctx, _, _, rewritten = run({
-        decision = "cpa",
-        body = '{"model":"cpa/model","prompt_cache_retention":"24h","value":1}',
-    })
-    assert(ctx.upstream_id == "cpa" and rewritten)
-    assert(not rewritten:find("prompt_cache_retention", 1, true))
-    local document = json.decode(rewritten)
-    assert(document and document.model == "cpa/model", rewritten)
+test("existing prompt cache rewrite preserves model and nested arrays", function()
+    for _, model in ipairs({"bare-id", "provider/model"}) do
+        local status, _, _, _, _, _, rewritten = run({body = json.encode({
+            model = model, prompt_cache_retention = "24h", input = {{role = "user", content = "test"}},
+        })})
+        local document = json.decode(rewritten)
+        assert(status == nil and document and document.model == model)
+        assert(document.prompt_cache_retention == nil and document.input[1].content == "test")
+        assert(rewritten:find('"input":[', 1, true))
+    end
 end)
 
-test("authoritative decision stores last-known-good in shared dict", function()
-    local shared = new_shared_dict()
-    local status, _, _, ctx = run({decision = "aisix", shared = shared})
+test("existing normal and expanded Responses body limits remain", function()
+    local body = '{"model":"bare-id","padding":"' .. string.rep("x", 16 * 1024 * 1024) .. '"}'
+    local status, _, _, ctx = run({body = body, uri = "/v1/chat/completions"})
+    assert(status == 400 and ctx.upstream_id == nil)
+    status, _, _, ctx = run({body = body, uri = "/v1/responses"})
     assert(status == nil and ctx.upstream_id == "aisix")
-    assert(shared._store["axis/model + exact"] == "aisix")
-end)
-
-test("transport failure uses fresh stored decision and warns once", function()
-    local shared = new_shared_dict()
-    run({decision = "cpa", shared = shared})
-    for _, options in ipairs({{connect_error = true}, {request_error = true}, {lookup_status = 500}, {lookup_body = "not-json"}}) do
-        options.shared = shared
-        local status, _, _, ctx, calls, _, _, log_lines = run(options)
-        assert(status == nil and ctx.upstream_id == "cpa")
-        assert(#calls <= 1) -- one bounded lookup attempt; connect errors never reach request()
-        assert(#log_lines == 1 and log_lines[1]:find("last%-known%-good"))
-        assert(log_lines[1]:find("axis/model") and not log_lines[1]:find("cpa%-secret"))
-    end
-end)
-
-test("transport failure without a stored decision stays 503", function()
-    local shared = new_shared_dict()
-    local status, body, _, ctx = run({connect_error = true, shared = shared})
-    assert(status == 503 and body:find('"code":"service_unavailable"', 1, true) and ctx.upstream_id == nil)
-    -- same, but entirely without a shared dict configured
-    status, body, _, ctx = run({connect_error = true})
-    assert(status == 503 and ctx.upstream_id == nil)
-end)
-
-test("not_found and unavailable delete the stored decision", function()
-    local shared = new_shared_dict()
-    run({decision = "cpa", shared = shared})
-    assert(shared._store["axis/model + exact"] == "cpa")
-    local status, _, _, ctx = run({decision = "not_found", shared = shared})
-    assert(status == 404 and ctx.upstream_id == nil)
-    assert(shared._store["axis/model + exact"] == nil)
-    -- stored entry must never be resurrected: transport failure now 503s
-    local fail_status, _, _, fail_ctx = run({connect_error = true, shared = shared})
-    assert(fail_status == 503 and fail_ctx.upstream_id == nil)
-    -- unavailable also deletes
-    run({decision = "aisix", shared = shared})
-    local un_status, _, _, un_ctx = run({decision = "unavailable", shared = shared})
-    assert(un_status == 503 and un_ctx.upstream_id == nil and shared._store["axis/model + exact"] == nil)
-    local fail2_status = run({connect_error = true, shared = shared})
-    assert(fail2_status == 503)
-end)
-
-test("stored decision is keyed by exact model ID", function()
-    local shared = new_shared_dict()
-    run({decision = "cpa", shared = shared, body = '{"model":"model-a"}'})
-    local status, _, _, ctx = run({connect_error = true, shared = shared, body = '{"model":"model-b"}'})
-    assert(status == 503 and ctx.upstream_id == nil)
-end)
-
-test("Responses admits expanded history without raising other request limits", function()
-    local body = string.rep(" ", 32 * 1024 * 1024 + 1) .. '{"model":"large-history"}'
-    local status, _, _, ctx, calls = run({body = body, uri = "/v1/responses"})
-    assert(status == nil and ctx.upstream_id == "cpa" and #calls == 1)
-    local rejected, _, _, rejected_ctx, rejected_calls = run({body = body, uri = "/v1/chat/completions"})
-    assert(rejected == 400 and rejected_ctx.upstream_id == nil and #rejected_calls == 0)
+    local too_large = string.rep("x", 64 * 1024 * 1024 + 1)
+    status, _, _, ctx = run({body = too_large, uri = "/v1/responses"})
+    assert(status == 400 and ctx.upstream_id == nil)
 end)
 
 print("PASS all " .. total .. " routing selector checks")
