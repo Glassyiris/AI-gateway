@@ -788,6 +788,7 @@ services:
       LISTEN_ADDR: :8090
       CONFIG_PATH: /app/config.yaml
       GOMEMLIMIT: 288MiB
+      CACHE_DIR: /var/cache/models-enricher
       CPA_MANAGEMENT_KEY: ${CPA_MANAGEMENT_KEY:?Set CPA_MANAGEMENT_KEY in .env}
       CPA_CLIENT_KEY: ${CPA_CLIENT_KEY:-${CPA_API_KEY:?Set CPA_CLIENT_KEY or CPA_API_KEY in .env}}
       AISIX_MODELS_URL: http://aisix:3000/v1/models
@@ -799,6 +800,8 @@ services:
     volumes:
       - ./models-enricher/config.yaml:/app/config.yaml:ro,Z
       - ./data/egress-proxy/ca-bundle.pem:/etc/ssl/certs/ai-gateway-ca-bundle.pem:ro,z
+      # 专用持久卷：元数据输入缓存跨重启/重建保留，只挂给 enricher。
+      - models-enricher-cache:/var/cache/models-enricher
 
   enricher-cpa-relay:
     <<: *socat-relay
@@ -1023,6 +1026,7 @@ services:
 
 volumes:
   response-keeper-cache: {}
+  models-enricher-cache: {}
 
 networks:
   apisix-models-aisix-source:
