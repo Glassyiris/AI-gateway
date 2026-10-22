@@ -277,6 +277,7 @@ else
   rendered_format=yaml
 fi
 
+python3 scripts/test-standard-cache-topology.py
 python3 - "$rendered" "$rendered_format" <<'PY'
 import ipaddress
 import json
@@ -297,11 +298,14 @@ services = compose.get("services") or {}
 networks = compose.get("networks") or {}
 if not services or not networks:
     raise SystemExit("Compose must define services and networks")
-# Persistent state lives in backed-up data/ binds. The only named volume is
-# keeper's disposable history cache (cleared on start), mounted by keeper alone.
-ALLOWED_VOLUMES = {"openai-api-cache-keeper-cache"}
-if "default" in networks or set(compose.get("volumes") or {}) - ALLOWED_VOLUMES:
-    raise SystemExit("default network and named persistent volumes are forbidden")
+# Persistent application state stays in backed-up data/ binds. Each disposable
+# cache has one named disk volume, mounted only by its owner at its cache path.
+CACHE_VOLUMES = {
+    "openai-api-cache-keeper-cache": ("openai-api-cache-keeper", "/var/tmp/openai-api-cache-keeper"),
+    "models-enricher-cache": ("models-enricher", "/var/cache/models-enricher"),
+}
+if "default" in networks or set(compose.get("volumes") or {}) != set(CACHE_VOLUMES):
+    raise SystemExit("default network forbidden; only keeper and enricher cache volumes may be defined")
 def volume_mounts(config):
     """(source, target) pairs; docker compose JSON uses long form, YAML may keep short form."""
     for volume in config.get("volumes", []):
@@ -312,9 +316,14 @@ def volume_mounts(config):
             yield parts[0], parts[1] if len(parts) > 1 else ""
 
 for service, config in services.items():
-    for source, _ in volume_mounts(config):
-        if source in ALLOWED_VOLUMES and service != "openai-api-cache-keeper":
-            raise SystemExit(f"{service} must not mount the keeper cache volume")
+    for source, target in volume_mounts(config):
+        if source in CACHE_VOLUMES and CACHE_VOLUMES[source] != (service, target):
+            raise SystemExit(f"{source} must be mounted only by its cache owner at its cache path")
+for source, (owner, target) in CACHE_VOLUMES.items():
+    if (source, target) not in set(volume_mounts(services.get(owner, {}))):
+        raise SystemExit(f"{owner} must mount its dedicated disk cache volume")
+if ((services.get("models-enricher") or {}).get("environment") or {}).get("CACHE_DIR") != "/var/cache/models-enricher":
+    raise SystemExit("models-enricher CACHE_DIR must use its dedicated disk cache volume")
 
 def service_networks(config):
     value = config.get("networks") or {}
@@ -441,8 +450,8 @@ if service_networks(operator_owner) != {"operator-host-source", "host-operator-t
     raise SystemExit("Operator must use its isolated host edge into the shared keepalive namespace")
 operator_relay = services.get("operator-host-relay", {})
 if operator_relay.get("network_mode") != "service:operator-host-netns" or not relay_is_hardened("operator-host-relay") \
-        or "TCP4-LISTEN:8080,bind=172.30.21.2," not in command_text(operator_relay) \
-        or "TCP4:172.30.22.2:8080," not in command_text(operator_relay):
+        or "TCP4-LISTEN:8080,bind=172.30.72.2," not in command_text(operator_relay) \
+        or "TCP4:172.30.73.2:8080," not in command_text(operator_relay):
     raise SystemExit("Operator relay must target only the shared keepalive, not APISIX or Sub2API directly")
 if (services.get("ai-sse-keepalive-proxy", {}).get("environment") or {}).get("LISTEN_ADDR") != ":8080":
     raise SystemExit("shared keepalive must accept both ingress relay targets on port 8080")

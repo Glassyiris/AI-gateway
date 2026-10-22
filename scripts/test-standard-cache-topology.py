@@ -2,6 +2,7 @@
 """Source-level guards for the shared standard Responses cache path."""
 
 import ast
+import copy
 import ipaddress
 import re
 import subprocess
@@ -95,6 +96,47 @@ class StandardCacheTopology(unittest.TestCase):
         for value in ("mem_limit: 128m", "cpus: 0.5", "pids_limit: 128", "GOMEMLIMIT: ${AI_SSE_KEEPALIVE_PROXY_GOMEMLIMIT:-96MiB}", "MAX_INSPECT_BODY_BYTES: ${AI_SSE_KEEPALIVE_PROXY_MAX_INSPECT_BODY_BYTES:-8388608}"):
             self.assertIn(value, keepalive)
 
+    def test_disposable_volumes_have_exact_owners_targets_and_cache_dir(self):
+        script = (ROOT / "scripts/validate.sh").read_text()
+        program = script.split('services = compose.get("services") or {}\n', 1)[1].split("def service_networks", 1)[0]
+        program = 'services = compose.get("services") or {}\n' + program
+        keeper = "openai-api-cache-keeper"
+        enricher = "models-enricher"
+        cache = {
+            "services": {
+                keeper: {"volumes": [keeper + "-cache:/var/tmp/" + keeper]},
+                enricher: {"volumes": [enricher + "-cache:/var/cache/" + enricher], "environment": {"CACHE_DIR": "/var/cache/" + enricher}},
+            },
+            "volumes": {keeper + "-cache": {}, enricher + "-cache": {}},
+            "networks": {"isolated": {}},
+        }
+        exec(program, {"compose": cache})
+        cases = []
+        for volume, owner, target in ((keeper + "-cache", keeper, "/var/tmp/" + keeper), (enricher + "-cache", enricher, "/var/cache/" + enricher)):
+            for name in ("foreign-owner", "wrong-target", "missing-mount", "missing-volume"):
+                bad = copy.deepcopy(cache)
+                if name == "foreign-owner":
+                    bad["services"]["intruder"] = {"volumes": [{"source": volume, "target": target}]}
+                elif name == "wrong-target":
+                    bad["services"][owner]["volumes"] = [volume + ":/wrong"]
+                elif name == "missing-mount":
+                    bad["services"][owner]["volumes"] = []
+                else:
+                    del bad["volumes"][volume]
+                cases.append((name + ":" + owner, bad))
+        bad = copy.deepcopy(cache)
+        bad["services"][enricher]["environment"]["CACHE_DIR"] = "/tmp/cache"
+        cases.append(("wrong-cache-dir", bad))
+        bad = copy.deepcopy(cache)
+        bad["volumes"]["unreviewed"] = {}
+        cases.append(("unreviewed-volume", bad))
+        bad = copy.deepcopy(cache)
+        bad["networks"]["default"] = {}
+        cases.append(("default-network", bad))
+        for name, bad in cases:
+            with self.subTest(name=name), self.assertRaises(SystemExit):
+                exec(program, {"compose": bad})
+
     def test_legacy_ansible_tags_fail_before_runtime_or_writes(self):
         preflight = (ROOT / "ansible/roles/ai_ops/tasks/preflight.yml").read_text()
         guard = preflight.split("- name: Detect Compose provider", 1)[0]
@@ -113,6 +155,8 @@ class StandardCacheTopology(unittest.TestCase):
             self.assertIn(value, relay)
         self.assertNotIn("apisix", relay)
         self.assertNotIn("    ports:", relay)
+        for endpoint in ("TCP4-LISTEN:8080,bind=172.30.72.2,", "TCP4:172.30.73.2:8080,"):
+            self.assertIn(endpoint, (ROOT / "scripts/validate.sh").read_text())
         shared = section(self.compose, "  ai-sse-keepalive-proxy-netns:\n")
         self.assertIn("host-operator-target:", shared)
         self.assertIn("ipv4_address: 172.30.73.2", shared)
