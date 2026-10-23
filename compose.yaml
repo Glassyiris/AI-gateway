@@ -815,7 +815,7 @@ services:
   models-enricher:
     build:
       context: ./models-enricher
-    image: ${MODELS_ENRICHER_IMAGE:-ghcr.io/xz-dev/ai-gateway-models-enricher:devin-bare-20261020-0af8c0e}
+    image: ${MODELS_ENRICHER_IMAGE:-ghcr.io/xz-dev/ai-gateway-models-enricher:scheduled-refresh-af3376dc95c5@sha256:432e88475f0131475caac054a9d8731bf1aedc119f40ab1389739c8294949310}
     pull_policy: build
     network_mode: service:models-enricher-netns
     restart: unless-stopped
