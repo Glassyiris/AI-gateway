@@ -11,17 +11,6 @@
 - name: "Prepare {{ ai_file_label }}"
   ansible.builtin.include_tasks: prepare-file.yml
 
-- name: "Adopt matching remote into baseline (remote == local, baseline stale or missing)"
-  ansible.builtin.copy:
-    src: "{{ ai_file_local }}"
-    dest: "{{ _ai_baseline }}"
-    mode: "0600"
-  when:
-    - ai_ops_mode != "plan"
-    - _ai_remote_stat.stat.exists
-    - _ai_local_stat.stat.checksum == _ai_remote_stat.stat.checksum
-    - not _ai_baseline_stat.stat.exists or _ai_baseline_stat.stat.checksum != _ai_local_stat.stat.checksum
-
 # Apply-only section below. Plan mode skips the rest of this file for THIS file
 # (end_role would end the whole role; when-gating keeps later files' diffs visible).
 
@@ -106,11 +95,28 @@
     - ai_activate_cmd is defined
     - _ai_upload is changed
 
+# Multi-file callers defer all baselines to final activation/verification.
+# A matching single-file adoption needs only readback, not a needless restart.
+- name: Decide whether this file's baseline can be committed
+  ansible.builtin.set_fact:
+    _ai_commit_baseline: "{{ ai_ops_mode != 'plan' and not (ai_defer_baseline | default(false)) and ((ai_activate_cmd is defined and _ai_upload is changed) or _ai_remote_stat.stat.checksum | default('') == _ai_local_stat.stat.checksum) }}"
+
+- name: Read back activated file before recording its baseline
+  ansible.builtin.stat:
+    path: "{{ ai_file_remote }}"
+    checksum_algorithm: sha256
+  register: _ai_activated_file
+  when: _ai_commit_baseline
+
+- name: Refuse changed activated file before advancing baseline
+  ansible.builtin.assert:
+    that: _ai_activated_file.stat.checksum == _ai_local_stat.stat.checksum
+    fail_msg: Activated file drifted; baseline was not advanced.
+  when: _ai_commit_baseline
+
 - name: "Record new baseline for {{ ai_file_label }}"
   ansible.builtin.copy:
     src: "{{ ai_file_local }}"
     dest: "{{ _ai_baseline }}"
     mode: "0600"
-  when:
-    - ai_ops_mode != "plan"
-    - _ai_upload is changed
+  when: _ai_commit_baseline

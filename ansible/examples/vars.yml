@@ -50,10 +50,16 @@ ai_ops_compose_project: ai-gateway
 # marker or required topology environment when overriding ai_ops_profiles.
 # Both local and remote rendering require Docker Compose v2 (not podman-compose).
 # ai_ops_local_compose_cmd: "docker compose"
-# Exact digest from that service's fresh deploy/rollback plan, never a stale run.
+# Required for every generic/front component, from its fresh plan, not a stale run.
 # ai_ops_front_approved_digest: ""
 # ai_ops_front_verify_retries: 30
 # ai_ops_front_verify_delay_seconds: 2
+# Per remote pull/recreate; allow >=1800 seconds for the whole controller.
+# ai_ops_component_command_timeout: 600
+# Isolated recover-stale-lock: original controller host, exact transaction and
+# dead-writer/receipt checks. Minimum age cannot be lower than 900 seconds.
+# ai_ops_lock_transaction: ""
+# ai_ops_lock_min_age_seconds: 900
 
 # --- Model sync -------------------------------------------------------------
 # Exact approval digest printed by --tags deploy-model-sync in plan mode.

@@ -372,9 +372,16 @@
           tags: [deploy-recovery]
       tags: [deploy-recovery]
 
-    # Front components use the same public deploy/rollback operations, with a
-    # private grouped snapshot and single-service CAS instead of legacy uploads.
-    - name: Run guarded front component operation selected by profile
+    - name: Recover only an explicitly selected stale component lock
+      ansible.builtin.include_role:
+        name: ai_ops
+        tasks_from: recover-stale-lock
+        apply:
+          tags: [recover-stale-lock]
+      tags: [recover-stale-lock]
+
+    # All profiles share the grouped CAS, image proof, readiness and receipt path.
+    - name: Run guarded component operation selected by profile
       ansible.builtin.include_role:
         name: ai_ops
         tasks_from: front-component
@@ -382,109 +389,13 @@
           tags: [deploy, rollback]
       vars:
         _front_operation: "{{ 'rollback' if 'rollback' in ansible_run_tags else 'deploy' }}"
-      when: ai_ops_profiles.get(service | default(''), {}).get('front_cache', false)
+      when: service | default('') in ai_ops_profiles
       tags: [deploy, rollback]
 
-    - name: Finish front component operation before legacy component tasks
+    - name: Finish component operation before unrelated scoped tasks
       ansible.builtin.meta: end_host
-      when: ai_ops_profiles.get(service | default(''), {}).get('front_cache', false)
+      when: service | default('') in ai_ops_profiles
       tags: [deploy, rollback]
-
-    # ======================= deploy (component) =======================
-    - name: Deploy compose.yaml
-      ansible.builtin.include_role:
-        name: ai_ops
-        tasks_from: deploy-file
-        apply:
-          tags: [deploy]
-      vars:
-        ai_file_label: compose.yaml
-        ai_file_local: "{{ ai_ops_config_dir }}/compose.yaml"
-        ai_file_remote: "{{ ai_ops_deploy_root }}/compose.yaml"
-      tags: [deploy]
-
-    - name: Deploy compose.override.yaml
-      ansible.builtin.include_role:
-        name: ai_ops
-        tasks_from: deploy-file
-        apply:
-          tags: [deploy]
-      vars:
-        ai_file_label: compose.override.yaml
-        ai_file_local: "{{ ai_ops_config_dir }}/compose.override.yaml"
-        ai_file_remote: "{{ ai_ops_deploy_root }}/compose.override.yaml"
-      tags: [deploy]
-
-    - name: Deploy .env
-      ansible.builtin.include_role:
-        name: ai_ops
-        tasks_from: deploy-file
-        apply:
-          tags: [deploy]
-      vars:
-        ai_file_label: .env
-        ai_file_local: "{{ ai_ops_config_dir }}/.env"
-        ai_file_remote: "{{ ai_ops_deploy_root }}/.env"
-      no_log: true  # .env may contain credentials; never log its content/diff
-      tags: [deploy]
-
-    - name: "Pull exact image for {{ service }}"
-      ansible.builtin.command: "{{ _compose }} pull --policy always {{ service }}"
-      when:
-        - ai_ops_mode != "plan"
-        - ai_ops_profiles[service].get('pull', true) | bool
-      tags: [deploy]
-
-    - name: "Require preloaded image for {{ service }}"
-      ansible.builtin.shell: |
-        set -e
-        image=$({{ _compose }} config --format json |
-          python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["{{ service }}"]["image"])')
-        {{ _runtime }} image inspect "$image" >/dev/null
-      register: _preloaded_image
-      changed_when: false
-      when:
-        - ai_ops_mode != "plan"
-        - not (ai_ops_profiles[service].get('pull', true) | bool)
-      tags: [deploy]
-
-    - name: "Recreate only {{ service }}"
-      ansible.builtin.command: "{{ _compose }} up -d --no-deps --no-build --pull never {{ service }}"
-      when: ai_ops_mode != "plan"
-      tags: [deploy]
-
-    - name: "Verify {{ service }} is running"
-      ansible.builtin.command: "{{ _compose }} ps --format json"
-      register: _svc_ps
-      changed_when: false
-      failed_when: _svc_ps.rc != 0
-      when: ai_ops_mode != "plan"
-      tags: [deploy]
-
-    - name: Show service status
-      ansible.builtin.debug:
-        var: _svc_ps.stdout_lines
-      when: ai_ops_mode != "plan"
-      tags: [deploy]
-
-    - name: "Assert {{ service }} appears in ps output"
-      ansible.builtin.assert:
-        that: service in (_svc_ps.stdout | string)
-        fail_msg: "{{ service }} not present in compose ps output"
-      when: ai_ops_mode != "plan"
-      tags: [deploy]
-
-    - name: Write sanitized receipt
-      ansible.builtin.copy:
-        dest: "{{ ai_ops_deploy_root }}/.ai-ops-state/receipt-{{ service }}-{{ lookup('ansible.builtin.pipe', 'date +%s') }}.txt"
-        mode: "0600"
-        content: |
-          operation=component-deploy service={{ service }}
-          mode={{ ai_ops_mode }}
-          capacity={{ _capacity.stdout }}
-          compose_ps={{ _svc_ps.stdout | default('') }}
-      when: ai_ops_mode != "plan"
-      tags: [deploy]
 
     # ======================= deploy-squid =======================
     # Tarball + manifest mechanism: one upload, one remote extract, drift gate
@@ -658,6 +569,7 @@
         apply:
           tags: [deploy-ws-keepalive]
       vars:
+        ai_defer_baseline: true
         ai_file_label: compose.yaml
         ai_file_local: "{{ ai_ops_config_dir }}/compose.yaml"
         ai_file_remote: "{{ ai_ops_deploy_root }}/compose.yaml"
@@ -670,6 +582,7 @@
         apply:
           tags: [deploy-ws-keepalive]
       vars:
+        ai_defer_baseline: true
         ai_file_label: .env
         ai_file_local: "{{ ai_ops_config_dir }}/.env"
         ai_file_remote: "{{ ai_ops_deploy_root }}/.env"
@@ -733,6 +646,31 @@
         - ai_ops_mode != "plan"
         - _wsk_runtime_drifted | bool
         - not (_ai_upload is defined and _ai_upload is changed)
+      tags: [deploy-ws-keepalive]
+
+    - name: Verify ws-keepalive before committing the grouped baselines
+      ansible.builtin.include_role:
+        name: ai_ops
+        tasks_from: verify-ws-keepalive
+        apply:
+          tags: [deploy-ws-keepalive]
+      vars:
+        _ai_verify_expected_image_identity: "{{ _wsk_expected_image_id }}"
+        _ai_verify_expected_revision: "{{ ai_ops_ws_keepalive_expected_revision }}"
+        ai_verify_old_container: "{{ _wsk_plan_container.stdout | trim }}"
+        ai_protected_containers: "{{ _wsk_protected_map }}"
+      when: ai_ops_mode != "plan"
+      tags: [deploy-ws-keepalive]
+
+    - name: Commit ws-keepalive grouped baselines after verification
+      ansible.builtin.copy:
+        src: "{{ ai_ops_deploy_root }}/{{ item }}"
+        dest: "{{ ai_ops_deploy_root }}/.ai-ops-state/{{ item }}.baseline"
+        remote_src: true
+        mode: '0600'
+      loop: [compose.yaml, .env]
+      when: ai_ops_mode != "plan"
+      no_log: true
       tags: [deploy-ws-keepalive]
 
     - name: Write sanitized ws-keepalive receipt
@@ -1420,54 +1358,3 @@
           skipped={{ ai_model_sync_summary.skipped }}
           outcome=success
       tags: [rollback-model-sync]
-
-    # ======================= rollback =======================
-    - name: Rollback compose.yaml
-      ansible.builtin.include_role:
-        name: ai_ops
-        tasks_from: rollback-file
-        apply:
-          tags: [rollback]
-      vars:
-        ai_file_label: compose.yaml
-        ai_file_remote: "{{ ai_ops_deploy_root }}/compose.yaml"
-      tags: [rollback]
-
-    - name: Rollback compose.override.yaml
-      ansible.builtin.include_role:
-        name: ai_ops
-        tasks_from: rollback-file
-        apply:
-          tags: [rollback]
-      vars:
-        ai_file_label: compose.override.yaml
-        ai_file_remote: "{{ ai_ops_deploy_root }}/compose.override.yaml"
-      tags: [rollback]
-
-    - name: Rollback .env
-      ansible.builtin.include_role:
-        name: ai_ops
-        tasks_from: rollback-file
-        apply:
-          tags: [rollback]
-      vars:
-        ai_file_label: .env
-        ai_file_remote: "{{ ai_ops_deploy_root }}/.env"
-      no_log: true
-      tags: [rollback]
-
-    - name: "Recreate {{ service }} with restored config"
-      ansible.builtin.command: "{{ _compose }} up -d --no-deps --no-build {{ service }}"
-      tags: [rollback]
-
-    - name: "Verify {{ service }} running after rollback"
-      ansible.builtin.command: "{{ _compose }} ps --format json"
-      register: _rb_ps
-      changed_when: false
-      tags: [rollback]
-
-    - name: Assert service present after rollback
-      ansible.builtin.assert:
-        that: service in (_rb_ps.stdout | string)
-        fail_msg: "{{ service }} not running after rollback"
-      tags: [rollback]

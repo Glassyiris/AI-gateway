@@ -99,13 +99,14 @@ class StandardCacheTopology(unittest.TestCase):
 
     def test_generic_component_prepares_image_before_no_pull_recreate(self):
         ops = (ROOT / "ansible/ops.yml").read_text()
-        generic = ops.split("# ======================= deploy (component) =======================", 1)[1].split("# ======================= deploy-squid", 1)[0]
-        prepare, recreate = generic.split('- name: "Recreate only {{ service }}"', 1)
-        self.assertIn('{{ _compose }} pull --policy always {{ service }}', prepare)
-        self.assertIn("ai_ops_profiles[service].get('pull', true) | bool", prepare)
-        self.assertIn("not (ai_ops_profiles[service].get('pull', true) | bool)", prepare)
-        self.assertIn('{{ _runtime }} image inspect "$image"', prepare)
-        self.assertIn('{{ _compose }} up -d --no-deps --no-build --pull never {{ service }}', recreate)
+        self.assertNotIn('Pull exact image for {{ service }}', ops)
+        self.assertIn("when: service | default('') in ai_ops_profiles", ops)
+        shared = (ROOT / 'ansible/roles/ai_ops/tasks/front-component.yml').read_text()
+        prepare, recreate = shared.split('- name: Recreate only selected front component', 1)
+        self.assertIn('Verify exact candidate digest locally', prepare)
+        self.assertIn('argv: ["{{ _runtime }}", pull, "{{ _front_scope.image }}"]', prepare)
+        self.assertIn("ai_ops_profiles[service].get('pull', true)", prepare)
+        self.assertIn("'--no-deps', '--no-build', '--pull', 'never'", recreate)
 
     def test_published_images_match_gitlinks_and_environment(self):
         env = (ROOT / ".env.example").read_text()
@@ -205,7 +206,7 @@ class StandardCacheTopology(unittest.TestCase):
 
             def check(value, accepted):
                 result = subprocess.run(["python3", "-c", program], input=json.dumps({
-                    "service": service, "current": config, "candidate": value, "expected_env": expected}),
+                    "service": service, "current": config, "candidate": value, "expected_env": expected, "front_cache": True, "pull": True}),
                     text=True, capture_output=True, timeout=3)
                 self.assertEqual(result.returncode == 0, accepted, result.stderr)
                 self.assertNotIn("secret-fixture", result.stdout + result.stderr)
@@ -233,7 +234,7 @@ class StandardCacheTopology(unittest.TestCase):
         profiles = (ROOT / "ansible/roles/ai_ops/defaults/main.yml").read_text()
         for service in (keeper, bridge):
             self.assertRegex(profiles, rf"\n  {service}:\n    front_cache: true\n")
-        self.assertIn("--no-deps --no-build --pull never {{ service }}", tasks)
+        self.assertIn("'--no-deps', '--no-build', '--pull', 'never', service", tasks)
         self.assertIn("env -i PATH=\"$PATH\"", tasks)
         self.assertLess(tasks.index("Require the exact approved front plan"), tasks.index("Pull only the exact pinned"))
         self.assertLess(tasks.index("Refuse changed live state immediately before"), tasks.index("Upload or restore only"))

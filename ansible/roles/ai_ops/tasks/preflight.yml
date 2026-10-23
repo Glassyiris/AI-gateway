@@ -14,13 +14,13 @@
       deploy/rollback profiles for keeper or bridge. Never apply the full
       development Compose to production.
 
-- name: Require explicit front mode and one operation before preflight writes
+- name: Require explicit component mode and one operation before preflight writes
   ansible.builtin.assert:
     that:
       - ai_ops_mode in ['plan', 'apply']
       - (ansible_run_tags | difference(['always', 'deploy']) | length == 0) or (ansible_run_tags | difference(['always', 'rollback']) | length == 0)
-    fail_msg: Front components require one deploy or rollback operation and explicit plan/apply mode.
-  when: ai_ops_profiles.get(service | default(''), {}).get('front_cache', false)
+    fail_msg: Components require one deploy or rollback operation and explicit plan/apply mode.
+  when: service | default('') in ai_ops_profiles and 'recover-stale-lock' not in ansible_run_tags
 
 - name: Detect Compose provider (mirrors scripts/container-runtime.sh)
   ansible.builtin.shell: |
@@ -69,7 +69,8 @@
     mode: "0700"
   when:
     - ai_ops_mode != "plan"
-    - not ai_ops_profiles.get(service | default(''), {}).get('front_cache', false)
+    - service | default('') not in ai_ops_profiles
+    - "'recover-stale-lock' not in ansible_run_tags"
 
 - name: Gather runtime versions
   ansible.builtin.shell: "{{ ai_ops_runtime if ai_ops_runtime != '' else 'docker' }} version --format '{{ '{{' }} .Server.Version {{ '}}' }}'"

@@ -23,9 +23,10 @@ Ansible never constructs configuration on the remote.
 # plan (read-only: shows diff, no upload, no restart)
 ansible-playbook ops.yml --tags deploy -e service=cli-proxy-api -e ai_ops_mode=plan
 
-# component deploy (registry-backed profiles pull first; archive-preloaded profiles
-# such as cpa-model-sync require the selected image to exist on the remote host)
-ansible-playbook ops.yml --tags deploy -e service=cli-proxy-api
+# After reviewing the plan digest; applies may interrupt in-flight streams.
+# Registry profiles pull by immutable ref; preload-only profiles never pull.
+ansible-playbook ops.yml --tags deploy -e service=cli-proxy-api \
+  -e ai_ops_mode=apply -e ai_ops_front_approved_digest='<reviewed-plan-digest>'
 
 # Squid policy (local render + pinned `-k parse` validation, then upload + restart)
 ansible-playbook ops.yml --tags deploy-squid -e ai_ops_mode=plan
@@ -62,8 +63,10 @@ ansible-playbook ops.yml --tags rollback-models-enricher-config
 ansible-playbook ops.yml --tags deploy-recovery -e ai_ops_mode=plan
 ansible-playbook ops.yml --tags deploy-recovery -e ai_ops_mode=apply
 
-# rollback last deploy of a component's file set
-ansible-playbook ops.yml --tags rollback -e service=cli-proxy-api
+# Rollback needs its own fresh plan and approval, not the deploy digest.
+ansible-playbook ops.yml --tags rollback -e service=cli-proxy-api -e ai_ops_mode=plan
+ansible-playbook ops.yml --tags rollback -e service=cli-proxy-api \
+  -e ai_ops_mode=apply -e ai_ops_front_approved_digest='<reviewed-rollback-digest>'
 
 # discover the operation surface
 ansible-playbook ops.yml --list-tags
@@ -84,9 +87,11 @@ defaults. Key ones:
 | `ai_ops_compose_project` | `ai-gateway` | compose project name |
 | `ai_ops_compose_cmd` | auto-detect | compose provider (`docker compose` / `podman compose` / `podman-compose`) |
 | `ai_ops_mode` | `apply` | `plan` = read-only diff |
-| `ai_ops_local_compose_cmd` | `docker compose` | Docker Compose v2 controller command for offline front-component rendering; not podman-compose |
-| `ai_ops_front_approved_digest` | `""` | exact reviewed keeper/bridge plan digest; required for apply and rollback |
-| `ai_ops_front_verify_retries` / `ai_ops_front_verify_delay_seconds` | `30` / `2` | bounded front-component health wait |
+| `ai_ops_local_compose_cmd` | `docker compose` | Docker Compose v2 controller command for offline component rendering; not podman-compose |
+| `ai_ops_front_approved_digest` | `""` | exact reviewed plan digest for **every component**, including generic deploy/rollback |
+| `ai_ops_front_verify_retries` / `ai_ops_front_verify_delay_seconds` | `30` / `2` | bounded component readiness wait |
+| `ai_ops_component_command_timeout` | `600` | seconds per async Docker pull/recreate; controller timeout must be at least 1800 seconds |
+| `ai_ops_lock_transaction` / `ai_ops_lock_min_age_seconds` | `""` / `900` | exact owned transaction and minimum age for guarded stale-lock recovery; age cannot be below 900 |
 | `ai_ops_min_mem_mb` / `ai_ops_min_disk_mb` | `200` / `1024` | capacity gate thresholds |
 | `ai_ops_squid_image` | `ai-gateway-squid:6.13-2-deb13u3-r1` | pinned image for offline parse validation |
 | `ai_ops_model_sync_approved_digest` | `""` | exact digest printed by the reviewed model-sync plan; required when the policy changes |
@@ -97,9 +102,14 @@ defaults. Key ones:
 
 ## Drift gate
 
-Legacy component profiles (`--tags deploy`, `deploy-aisix`, `deploy-model-sync`) checksum each managed remote
-file against the recorded baseline (`.ai-ops-state/<file>.baseline`); a mismatch
-stops the deploy before any upload. Squid policy deploys (`--tags deploy-squid`)
+Component `deploy`/`rollback` use the grouped three-file and runtime CAS described
+below. Scoped file operations (`deploy-aisix`, `deploy-model-sync`) checksum each
+managed remote file against `.ai-ops-state/<file>.baseline`; a mismatch stops the
+deploy before upload. Baselines advance only after activation and readback, not
+during a multi-file upload. A file-only preparation defers its baseline to the
+caller's final verification. A reviewed, already-matching single-file adoption
+still establishes its baseline after readback without recreating. The grouped
+component path leaves historical baseline drift for explicit reconciliation. Squid policy deploys (`--tags deploy-squid`)
 upload one tarball + a `sha256sum` manifest over all generated files; the drift
 gate verifies the whole remote tree against the last deployed manifest
 (`sha256sum -c`), which keeps the same guarantee at ~2 SSH round trips instead of
@@ -108,10 +118,13 @@ edited by hand: review the shown diff/failing files, adopt the change into the
 local config, and re-run. Rollback likewise refuses to overwrite a remote file
 that changed independently after the deploy.
 
-## Keeper and ws-sse bridge rollout
+## Guarded component rollout
 
-`openai-api-cache-keeper` and `responses-ws-sse-bridge` now have guarded
-`ai_ops_profiles` entries using the existing `deploy` and `rollback` operations.
+All `ai_ops_profiles` entries, including keeper and bridge, share one grouped
+`deploy`/`rollback` transaction. Generic profiles no longer upload three files
+and advance their baselines before pulling or recreating. A rollback requires a
+snapshot from this guarded path; legacy unowned `.predeploy` files are not
+silently treated as a reviewed transaction.
 The scoped `deploy-standard-cache-path`, `restart-openai-api-cache-keeper` and
 `rollback-standard-cache-path` tags remain retired, like the older
 `deploy-response-keeper`, `deploy-responses-path` and `restart-response-keeper`.
@@ -141,31 +154,49 @@ ansible-playbook ops.yml --tags rollback -e service=openai-api-cache-keeper \
 Plan reads configuration hashes, effective Compose and live container identities;
 it never uploads, pulls or recreates. Secret-bearing Compose/environment output
 is suppressed. `config_diff: false` means the three source files equal live bytes,
-not that an apply is needed. Plan shows only approved topology environment,
-immutable image, health, namespace owner, protected-container count and digest.
+not that an apply is needed or that apply was tested. Plan executes the **same
+remote argv prefix** with `config --quiet`, prints the exact validation/pull/up
+argv, and verifies the candidate is present by `docker image inspect` or pullable
+by read-only `docker manifest inspect`. Registry failure is not bypassed. Plan
+also shows the image proof, readiness source, writer-lock owner, approved
+non-secret environment fields, namespace owner, protected-container count and
+digest.
 The digest binds the source location, all three candidate/live SHA256 hashes,
 selected container identity/state and every protected project-container identity/state.
-A stale digest refuses apply before any mutation. Cooperating front-component
-applies share one exclusive lock; planning never acquires it. An interrupted
-controller can leave that lock behind: confirm the writer is gone and coordinate
-recovery before removing it, never bypass a live owner's lock.
+A stale digest refuses apply before mutation. All component applies share one
+exclusive lock; planning never acquires it. The lock records the transaction,
+UTC epoch start, original controller host/PID and approval digest. The PID is
+the outermost Ansible controller, not a short-lived task worker. Durable
+`transaction-<id>.json` progress records survive controller death; guarded recovery
+is below. Never delete a lock merely because a controller timed out.
 
 Only the selected service's **image/environment** may change. All other effective
 Compose settings, mounts, resource limits, dependencies, networks and services
-must remain identical. Images require a 40-character source revision and SHA256
-digest. Keeper stays `UPSTREAM_URL=http://127.0.0.1:8086` with
+must remain identical. Registry images require a SHA256 digest; keeper and bridge
+also require a 40-character source revision. Explicit preload-only profiles may
+use their existing local tag, with its image ID bound into the approval. Keeper stays `UPSTREAM_URL=http://127.0.0.1:8086` with
 `IGNORE_CLIENT_STORE_FALSE=true`; bridge stays loopback `:8086` with `PORT=8086`.
 Neither profile can add provider credentials or routing. Compose runs with a
 clean process environment so ambient shell exports cannot override `.env`.
 
-Apply explicitly pulls that pinned image, checks fresh hashes/identities again,
-and creates a private grouped snapshot (`0700` directory, `0600` files) under
+Apply calls `docker pull <immutable-ref>` directly, independent of Compose's
+`pull_policy: never`; preload-only and rollback branches never pull. Before any
+upload/recreate, `docker image inspect <ref>` must prove the local ID/RepoDigest
+matches the pin (multiarch index digest need not equal the config ID). A skipped
+pull or wrong digest fails before activation. It checks fresh hashes/identities
+again and creates a private grouped snapshot (`0700` directory, `0600` files) under
 `.ai-ops-state/front-<service>-*`. It checks source/snapshot/live hashes again,
 uploads the reviewed three files, checks effective configuration, then runs only
 `up -d --force-recreate --no-deps --no-build --pull never <service>`. Readback
-requires the exact image ID/reference, selected environment, healthy status,
-correct shared namespace owner/inode, and every adjacent container identity
-unchanged. The private snapshot contains a sanitized success receipt; the guarded
+requires the exact image ID/reference, **all configured environment values**,
+readiness, correct namespace owner/inode where shared, and every adjacent
+container's ID/image/StartedAt/state unchanged. Readiness uses Docker
+`health=healthy` when available. Without a HEALTHCHECK it calls existing
+`gateway-recovery.py` `OBSERVE_HTTP`/`namespace_probe` code (cloudflared, AISIX,
+aisix-status, model-catalog-sidecar), or the existing completed-cycle readiness
+check for cpa-model-sync. It never invents a passing probe or starts a worker
+sync; profiles with no known probe fail closed. Only after these checks and a
+fresh group readback are all three baselines committed. The private snapshot contains a sanitized success receipt; the guarded
 rollback reference is `.ai-ops-state/front-<service>-last.json`.
 
 A failed activation stops with a private `front-<service>-failure.json` receipt;
@@ -177,19 +208,72 @@ After any emergency edit or rollback, adopt the resulting files back into local
 `private-config` immediately. The host Git checkout is never a deployment source.
 
 Coordinate one production writer and a maintenance window. **Recreating keeper
-or bridge interrupts in-flight streams**; completed keeper history remains on its
-named volume. This path does not change Sub2API accounts, restart dependencies,
+or bridge interrupts in-flight streams**. The named volume survives, but keeper
+intentionally wipes its alias/history buckets on startup; restart does not
+restore cached continuations. This path does not change Sub2API accounts, restart dependencies,
 repair a failed whole-stack boot, or prove provider continuation. Follow the
 [WS decision](../docs/websocket-termination.md) and
 [routing checklist](../docs/model-routing.md#checklist-before-pushing-or-deploying);
 real SSE/WS terminal and reconnect acceptance is a separate authorized check.
+
+### Controller deadline, logs and stale-lock recovery
+
+Allow **at least 1800 seconds** for the whole controller invocation. Docker
+pull/recreate each have a 600-second remote async bound; that is not the whole
+playbook's duration. Do not put a 300-second `subprocess.run(timeout=...)` around
+apply or discard partial stdout on timeout. Keep a private streamed log:
+
+```bash
+umask 077
+mkdir -p /var/tmp/ai-gateway-ops-logs
+set -o pipefail
+timeout --signal=TERM --kill-after=30s 30m \
+  ansible-playbook ops.yml --tags deploy -e service=models-enricher \
+  -e ai_ops_mode=apply -e ai_ops_front_approved_digest='<reviewed-plan-digest>' \
+  2>&1 | tee /var/tmp/ai-gateway-ops-logs/models-enricher-apply.log
+```
+
+The durable progress receipt records locked → preparing-image → image-ready →
+uploading-config → activating → verifying → committing-baselines → complete.
+Each update is atomic, mode 0600 and fsynced. A killed controller can leave a
+stage marked *in-progress*: it does **not** prove that stage's action failed or
+that activation did not happen. Inspect the current image/env/namespace, all
+protected containers, three file hashes, baselines and snapshot before deciding
+to complete or roll back. No automatic rollback is claimed. Ordinary Ansible
+failure writes a failed receipt before releasing only its owned lock.
+
+Recovery is a separate operation, not a deployment retry:
+
+```bash
+ansible-playbook ops.yml --tags recover-stale-lock -e ai_ops_mode=plan
+# Review owner.json and matching transaction-<id>.json first.
+ansible-playbook ops.yml --tags recover-stale-lock -e ai_ops_mode=apply \
+  -e ai_ops_lock_transaction='<exact-32-hex-transaction>'
+```
+
+Apply requires a lock at least 900 seconds old, matching owner/progress receipt,
+the original controller host with its recorded PID gone, and no other
+Ansible/AnsiballZ/Docker Compose/pull writer locally or remotely (excluding only
+this recovery command's own ancestry). Any unknown/mismatch leaves the lock.
+Legacy empty/unowned locks require manual investigation, not this recovery tag.
+Recovery records `recovery-required`, releases ownership, and changes **no live
+configuration, baseline or container**. Plan shows the owner without creating
+state. This also preserves the experiment monitor's empty writer lock: it cannot
+be mistaken for a stale Ansible transaction.
+
+Offline lifecycle verification (fake Docker, no production apply):
+
+```bash
+python3 scripts/test-component-deploy.py
+python3 scripts/test-component-apply.py --evidence /var/tmp/component-apply-tests
+```
 
 ## Model-sync policy safety
 
 `deploy-model-sync` requires a running preview-capable sidecar image before the
 first managed policy change. First adopt the reviewed live
 `cpa-model-sync/config.json` into the ignored private path; when local and remote
-bytes match, apply establishes the baseline without recreating the service.
+bytes match, readback establishes the reviewed baseline without recreation.
 
 For a changed policy, plan mode streams local JSON to `cpa-model-sync --preview -`
 inside the existing container. Preview performs only CPA/source reads and prints
@@ -208,7 +292,7 @@ models-enricher image (one that provides `validate-config`) before the first
 managed config change. First adopt the reviewed live
 `models-enricher/config.yaml` into the ignored private path
 `ansible/private-config/models-enricher/config.yaml`; when local and remote
-bytes match, apply establishes the baseline without recreating the service.
+bytes match, readback establishes the reviewed baseline without recreation.
 
 For a changed config, plan mode streams local YAML to
 `models-enricher validate-config -` inside the running container — the same

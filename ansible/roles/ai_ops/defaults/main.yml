@@ -64,13 +64,19 @@ ai_ops_profiles:
   egress-proxy:
     pull: false
 
-# Front component operations need Docker Compose v2 on the controller for an
+# Shared component operations need Docker Compose v2 on the controller for an
 # offline, secret-suppressed candidate render. No local Docker daemon is used.
 ai_ops_local_compose_cmd: docker compose
 # Plan identity binds all three candidate/live file hashes and container IDs.
 ai_ops_front_approved_digest: ''
 ai_ops_front_verify_retries: 30
 ai_ops_front_verify_delay_seconds: 2
+# Per Docker pull/recreate step. Allow >=1800s for the whole controller command.
+ai_ops_component_command_timeout: 600
+# A recovery needs this exact owned transaction, local/remote liveness checks,
+# and a lock at least 15 minutes old. It never changes config or activates it.
+ai_ops_lock_transaction: ''
+ai_ops_lock_min_age_seconds: 900
 
 # Model-sync deploy: exact preview digest approved from ai_ops_mode=plan.
 ai_ops_model_sync_approved_digest: ""

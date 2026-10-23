@@ -88,7 +88,8 @@ profiles; the old scoped standard-cache tags remain retired and fail in prefligh
 See [Keeper and ws-sse bridge rollout](../ansible/README.md#keeper-and-ws-sse-bridge-rollout).
 Coordinate one production writer and a maintenance window with other owners and
 this recovery timer. A keeper restart interrupts in-flight streams and collectors;
-completed cached history remains on its named volume.
+the named volume survives, but keeper wipes its history buckets at startup, so
+cached continuations are not restored.
 
 The updated recovery source includes bridge `:8086/healthz` among its eight
 application checks. This addition is not deployed merely by committing the source;
@@ -101,6 +102,33 @@ deadlocked there: the bridge healthcheck probed its default `PORT` 8080
 waited for a healthy bridge, keepalive waited for keeper, and the unit hit its
 start limit. The bridge now sets `PORT=8086`; a topology test keeps it equal to
 the listen port.
+
+## Component deployment readiness and interrupted controllers
+
+Generic component deploy/rollback now shares the keeper/bridge transaction:
+reviewed three-file/runtime CAS, immutable-image proof before recreate, bounded
+readiness, and unchanged neighbouring identities. Docker HEALTHCHECK is used when
+present. Services without one use the existing read-only `OBSERVE_HTTP` probes
+below through `namespace_probe`; cpa-model-sync uses `worker_health(...).ready`,
+not merely its live-worker `ok` flag. Unknown readiness refuses activation; no
+new probe URL or restart authorization is inferred.
+
+The remote `transaction-<id>.json` progress receipt and owned lock survive a
+controller kill. A controller deadline should be at least 30 minutes, not 300
+seconds. `recover-stale-lock` is separately planned and names the exact
+transaction, requires matching owner/receipt, an age of at least 15 minutes,
+the recorded controller PID gone on its original host, and no other deployment
+writers locally/remotely. It releases only ownership; it never declares success,
+rolls back, or changes live configuration. An empty lock left by the bounded
+keeper experiment monitor has no Ansible owner and cannot pass this recovery.
+See [component operations](../ansible/README.md#controller-deadline-logs-and-stale-lock-recovery)
+for partial logs, progress stages and recovery commands.
+
+The changed apply/rollback path was verified offline with fake Docker, including
+failed/skipped pulls, wrong digests, failed recreation, controller kill, guarded
+lock recovery, native HTTP readiness, CAS and neighbour drift. Read-only
+production plans do not prove production apply. No production container was
+recreated by this repair lane.
 
 ## Verification and limits
 
