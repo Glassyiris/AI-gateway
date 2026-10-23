@@ -68,10 +68,15 @@ func main() {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("/readyz", snapshots.handleReadiness())
-	catalog := handleModels(cfg, cpa, aisix, pool, log, snapshots)
-	mux.HandleFunc("/v1/models", catalog)
-	mux.HandleFunc("/models-table", catalog)
-	mux.HandleFunc("/models-table/refresh", catalog)
+	catalog := newModelsHandler(cfg, cpa, aisix, pool, log, snapshots)
+	refreshDone := catalog.start(snapshotCtx)
+	defer func() {
+		stopSnapshots()
+		<-refreshDone
+	}()
+	mux.Handle("/v1/models", catalog)
+	mux.Handle("/models-table", catalog)
+	mux.Handle("/models-table/refresh", catalog)
 	mux.HandleFunc("/routing-index", snapshots.handleRoutingIndex())
 
 	addr := env("LISTEN_ADDR", ":8090")
@@ -229,12 +234,24 @@ type modelsHandler struct {
 	owner         *routingSnapshotOwner
 	refreshOnMiss bool
 
-	refreshMu sync.Mutex
-	refresh   *refreshResult
+	refreshMu     sync.Mutex
+	refresh       *refreshResult
+	refreshCtx    context.Context
+	table         *refreshResult
+	lastAttempt   *refreshResult
+	lastSuccess   time.Time
+	nextScheduled time.Time
 }
 
 func newModelsHandler(cfg *Config, cpa *CPAClient, aisix *AISIXClient, pool *httpPool, log *slog.Logger, owners ...*routingSnapshotOwner) *modelsHandler {
-	h := &modelsHandler{cfg: cfg, cpa: cpa, pool: pool, log: log, refreshOnMiss: len(owners) == 0 || owners[0] == nil}
+	config := *cfg
+	if config.ScheduledRefreshInterval == 0 {
+		config.ScheduledRefreshInterval = defaultScheduledRefreshInterval
+	}
+	if config.EntryRefreshWindow == 0 {
+		config.EntryRefreshWindow = defaultEntryRefreshWindow
+	}
+	h := &modelsHandler{cfg: &config, cpa: cpa, pool: pool, log: log, refreshCtx: context.Background(), refreshOnMiss: len(owners) == 0 || owners[0] == nil}
 	if h.refreshOnMiss {
 		h.owner = newRoutingSnapshotOwner(cpa, aisix, readCacheTTL, cfg.ChannelTimeout, log)
 	} else {
@@ -273,11 +290,13 @@ func (h *modelsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if table {
+		h.serveTable(w)
+		return
+	}
 	format := catalogCodex
 	cv := r.URL.Query().Get("client_version")
-	if table {
-		format, cv = catalogTable, tableInventoryClientVersion
-	} else if cv == "" {
+	if cv == "" {
 		format, cv = catalogStandard, cpaCatalogClientVersion
 	}
 	serve := func(f *flightResult) bool {
@@ -394,8 +413,8 @@ func (h *modelsHandler) buildLocked(r *http.Request, cv string, snapshot *routin
 
 // forceRefresh 绕过新鲜度重新读取；元数据失败仍回退到最后成功响应，
 // 并按当前权威快照重新合成，绝不重放旧表格。
-func (h *modelsHandler) forceRefresh(r *http.Request) (int, []byte, int32) {
-	ctx, cancel := context.WithTimeout(withReadCacheBypass(context.Background()), h.cfg.OverallDeadline+5*time.Second)
+func (h *modelsHandler) forceRefresh(parent context.Context) (int, []byte, int32) {
+	ctx, cancel := context.WithTimeout(withReadCacheBypass(parent), h.cfg.OverallDeadline+5*time.Second)
 	defer cancel()
 	refreshErr := h.owner.forceRefresh(ctx)
 	snapshot := h.owner.current()
@@ -410,7 +429,115 @@ func (h *modelsHandler) forceRefresh(r *http.Request) (int, []byte, int32) {
 	if refreshErr != nil {
 		h.log.Warn("forced refresh incomplete; rebuilding from current snapshot", "err", refreshErr)
 	}
-	return h.build(r.Clone(ctx), tableInventoryClientVersion, snapshot, catalogTable)
+	r, _ := http.NewRequestWithContext(ctx, http.MethodGet, "/models-table", nil)
+	status, body, stale := h.build(r, tableInventoryClientVersion, snapshot, catalogTable)
+	if refreshErr != nil && h.owner.aisix != nil {
+		stale++
+	}
+	return status, body, stale
+}
+
+// start owns the ticker and waits for shared work to stop before cache shutdown.
+func (h *modelsHandler) start(ctx context.Context) <-chan struct{} {
+	h.refreshMu.Lock()
+	h.refreshCtx = ctx
+	h.nextScheduled = time.Now().Add(h.cfg.ScheduledRefreshInterval)
+	h.refreshMu.Unlock()
+	ticker := time.NewTicker(h.cfg.ScheduledRefreshInterval)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer ticker.Stop()
+		h.startRefresh(false)
+		for {
+			select {
+			case <-ctx.Done():
+				h.refreshMu.Lock()
+				f := h.refresh
+				h.nextScheduled = time.Time{}
+				h.refreshMu.Unlock()
+				if f != nil {
+					<-f.done
+				}
+				return
+			case at := <-ticker.C:
+				h.refreshMu.Lock()
+				h.nextScheduled = at.Add(h.cfg.ScheduledRefreshInterval)
+				h.refreshMu.Unlock()
+				h.startRefresh(false)
+			}
+		}
+	}()
+	return done
+}
+
+// The window check and job claim share a lock; upstream I/O never holds it.
+func (h *modelsHandler) startRefresh(entry bool) *refreshResult {
+	h.refreshMu.Lock()
+	defer h.refreshMu.Unlock()
+	if h.refreshCtx.Err() != nil || (entry && !h.lastSuccess.IsZero() && time.Since(h.lastSuccess) <= h.cfg.EntryRefreshWindow) {
+		return nil
+	}
+	if h.refresh != nil {
+		return h.refresh
+	}
+	f := &refreshResult{done: make(chan struct{})}
+	h.refresh = f
+	ctx := h.refreshCtx
+	go func() {
+		f.status, f.body, f.stale = h.forceRefresh(ctx)
+		f.at = time.Now()
+		h.refreshMu.Lock()
+		defer h.refreshMu.Unlock()
+		h.lastAttempt = f
+		if f.status == http.StatusOK && ctx.Err() == nil {
+			h.table = f
+			if f.stale == 0 {
+				h.lastSuccess = f.at
+			}
+		}
+		h.refresh = nil
+		close(f.done)
+	}()
+	return f
+}
+
+func (h *modelsHandler) refreshNoticeLocked() tableNotice {
+	notice := tableNotice{LastRefreshed: "尚无成功刷新", NextScheduled: "未启动或已停止"}
+	if !h.lastSuccess.IsZero() {
+		notice.LastRefreshed = h.lastSuccess.UTC().Format(time.RFC3339)
+	}
+	if !h.nextScheduled.IsZero() {
+		notice.NextScheduled = h.nextScheduled.UTC().Format(time.RFC3339)
+	}
+	return notice
+}
+
+func (h *modelsHandler) serveTable(w http.ResponseWriter) {
+	h.startRefresh(true)
+	h.refreshMu.Lock()
+	f, attempted, running := h.table, h.lastAttempt, h.refresh != nil
+	notice := h.refreshNoticeLocked()
+	h.refreshMu.Unlock()
+	status, body, at := http.StatusOK, []byte(`{"models":[]}`), time.Now()
+	if f == nil {
+		notice.Class, notice.Text = "warning", "加载中 · 暂无目录数据；后台刷新不阻塞页面，可手动刷新并等待完成"
+	} else {
+		status, body, at = f.status, f.body, f.at
+		if f.stale > 0 {
+			notice.Class, notice.Text = "warning", "部分输入刷新失败；显示由最后成功输入重新合成的目录"
+		}
+		if running {
+			notice.Class, notice.Text = "warning", "正在后台刷新 · 当前显示最近可用的目录"
+		}
+	}
+	if attempted != nil && attempted.status != http.StatusOK {
+		notice.Class, notice.Text = "warning", "上次刷新失败 · "+attempted.at.UTC().Format(time.RFC3339)+" · "+notice.Text
+	}
+	status, html := renderModelsTable(status, body, at, notice)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = w.Write(html)
 }
 
 func (h *modelsHandler) handleForceRefresh(w http.ResponseWriter, r *http.Request) {
@@ -419,34 +546,26 @@ func (h *modelsHandler) handleForceRefresh(w http.ResponseWriter, r *http.Reques
 		h.write(w, true, status, body)
 		return
 	}
-	h.refreshMu.Lock()
-	f := h.refresh
+	f := h.startRefresh(false)
 	if f == nil {
-		f = &refreshResult{done: make(chan struct{})}
-		h.refresh = f
-		go func() {
-			f.status, f.body, f.stale = h.forceRefresh(r)
-			f.at = time.Now()
-			close(f.done)
-			h.refreshMu.Lock()
-			h.refresh = nil
-			h.refreshMu.Unlock()
-		}()
+		status, body := errorJSON(http.StatusServiceUnavailable, "refresh_stopped", "catalog refresh is shutting down")
+		h.write(w, true, status, body)
+		return
 	}
-	h.refreshMu.Unlock()
 	select {
 	case <-f.done:
 	case <-r.Context().Done():
 		return
 	}
 	attemptedAt := f.at.UTC().Format(time.RFC3339)
+	h.refreshMu.Lock()
+	notice := h.refreshNoticeLocked()
+	h.refreshMu.Unlock()
+	notice.Class, notice.Text = "success", "刷新成功 · "+attemptedAt
 	if f.status != http.StatusOK {
-		h.write(w, true, f.status, f.body)
-		return
-	}
-	notice := tableNotice{Class: "success", Text: "刷新成功 · " + attemptedAt}
-	if f.stale > 0 {
-		notice = tableNotice{Class: "warning", Text: fmt.Sprintf("刷新完成 · %s · %d 个输入接口刷新失败，已使用其最后成功的响应", attemptedAt, f.stale)}
+		notice.Class, notice.Text = "warning", "刷新失败 · "+attemptedAt
+	} else if f.stale > 0 {
+		notice.Class, notice.Text = "warning", fmt.Sprintf("刷新完成 · %s · %d 个输入接口刷新失败，已使用其最后成功的响应或省略不可用补充源", attemptedAt, f.stale)
 	}
 	status, html := renderModelsTable(f.status, f.body, f.at, notice)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

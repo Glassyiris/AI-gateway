@@ -49,8 +49,10 @@ type tableCell struct {
 }
 
 type tableNotice struct {
-	Class string
-	Text  string
+	Class         string
+	Text          string
+	LastRefreshed string
+	NextScheduled string
 }
 
 type modelsTableView struct {

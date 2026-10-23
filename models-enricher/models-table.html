@@ -23,6 +23,7 @@
 <h1>models-table</h1>
 <form id="refresh" method="post" action="/models-table/refresh"><button type="submit">强制刷新</button></form>
 <div id="meta">{{.Meta}}</div>
+{{if .Notice.LastRefreshed}}<div id="refresh-times">最后成功刷新：{{.Notice.LastRefreshed}} · 下次定时刷新：{{.Notice.NextScheduled}}</div>{{end}}
 {{if .Notice.Text}}<div id="notice" class="{{.Notice.Class}}">{{.Notice.Text}}</div>{{end}}
 <div id="err">{{.Error}}</div>
 {{if not .Error}}

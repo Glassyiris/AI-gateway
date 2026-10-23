@@ -137,7 +137,9 @@ func newTestHandler(t *testing.T, cfg *Config, cpa *httptest.Server) http.Handle
 	t.Helper()
 	pool := newHTTPPool(8, 5*time.Second)
 	aisix := newAISIXClient(cfg.AISIXModelsURL, cfg.AISIXToken, cfg.AISIXTimeout, pool)
-	return handleModels(cfg, newCPAClient(cpa.URL, "m", "c", pool, testLog()), aisix, pool, testLog())
+	h := newModelsHandler(cfg, newCPAClient(cpa.URL, "m", "c", pool, testLog()), aisix, pool, testLog())
+	cancelRefreshOnCleanup(t, h)
+	return h
 }
 
 func testCfg() *Config {

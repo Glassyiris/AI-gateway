@@ -10,6 +10,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const (
+	defaultScheduledRefreshInterval = 30 * time.Minute
+	defaultEntryRefreshWindow       = 10 * time.Minute
+)
+
 // 源 token 只允许 provider-qualified 形式：
 //
 //	models.dev/<provider-id>
@@ -62,6 +67,12 @@ type Config struct {
 	AISIXModelsURL string        `yaml:"aisix_models_url"`
 	AISIXTimeout   time.Duration `yaml:"aisix_timeout"`
 	AISIXToken     string        `yaml:"-"`
+
+	// ScheduledRefreshInterval 是 models-table 目录的定时全量刷新周期（默认 30m）。
+	// EntryRefreshWindow 是进入页面的有效刷新窗口（默认 10m）：窗口内不触发，
+	// 超过窗口则异步触发同一个单飞刷新任务，响应不等待。两项独立配置且必须为正值。
+	ScheduledRefreshInterval time.Duration `yaml:"scheduled_refresh_interval"`
+	EntryRefreshWindow       time.Duration `yaml:"entry_refresh_window"`
 
 	providerPrefixes providerPrefixes
 }
@@ -178,11 +189,13 @@ func loadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 	cfg := &Config{
-		HTTPConcurrency: 8,
-		ChannelTimeout:  8 * time.Second,
-		OverallDeadline: 25 * time.Second,
-		Channels:        map[string]ChannelConfig{},
-		CustomChannels:  map[string]ChannelConfig{},
+		HTTPConcurrency:          8,
+		ChannelTimeout:           8 * time.Second,
+		OverallDeadline:          25 * time.Second,
+		Channels:                 map[string]ChannelConfig{},
+		CustomChannels:           map[string]ChannelConfig{},
+		ScheduledRefreshInterval: defaultScheduledRefreshInterval,
+		EntryRefreshWindow:       defaultEntryRefreshWindow,
 	}
 	if err := yaml.Unmarshal(raw, cfg); err != nil {
 		return nil, err
@@ -213,6 +226,12 @@ func loadConfig(path string) (*Config, error) {
 	}
 	if cfg.AISIXTimeout > cfg.OverallDeadline {
 		cfg.AISIXTimeout = cfg.OverallDeadline
+	}
+	if cfg.ScheduledRefreshInterval <= 0 {
+		return nil, fmt.Errorf("scheduled_refresh_interval must be positive")
+	}
+	if cfg.EntryRefreshWindow <= 0 {
+		return nil, fmt.Errorf("entry_refresh_window must be positive")
 	}
 	if u := os.Getenv("AISIX_MODELS_URL"); u != "" {
 		cfg.AISIXModelsURL = u

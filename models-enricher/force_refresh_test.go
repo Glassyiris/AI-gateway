@@ -17,6 +17,7 @@ import (
 
 type forceRefreshFixture struct {
 	handler       http.Handler
+	models        *modelsHandler
 	owner         *routingSnapshotOwner
 	version       atomic.Int32
 	nativeStatus  atomic.Int32
@@ -141,7 +142,9 @@ func newForceRefreshFixture(t *testing.T) *forceRefreshFixture {
 		t.Fatal(err)
 	}
 	f.owner = owner
-	f.handler = handleModels(cfg, client, newAISIXClient(aisix.URL, "", time.Second, pool), pool, log, owner)
+	f.models = newModelsHandler(cfg, client, newAISIXClient(aisix.URL, "", time.Second, pool), pool, log, owner)
+	f.handler = f.models
+	cancelRefreshOnCleanup(t, f.models)
 	catalogCacheTTL.Store(int64(time.Minute))
 	catalogCacheMaxBytes.Store(64 << 20)
 	t.Cleanup(func() {
@@ -192,6 +195,9 @@ func TestReadCacheForceRefreshDoesNotJoinOrdinaryFlight(t *testing.T) {
 
 func TestModelsTableForceRefreshMethodsAndFullChain(t *testing.T) {
 	f := newForceRefreshFixture(t)
+	if got := requestForceRefresh(f.handler, http.MethodPost, "/models-table/refresh"); got.Code != http.StatusOK {
+		t.Fatal(got.Code)
+	}
 	first := requestForceRefresh(f.handler, http.MethodGet, "/models-table")
 	if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), `method="post"`) || !strings.Contains(first.Body.String(), `action="/models-table/refresh"`) || strings.Contains(first.Body.String(), "刷新成功") {
 		t.Fatalf("normal table response lacks read-only refresh form: HTTP %d %.300s", first.Code, first.Body.String())
@@ -225,7 +231,7 @@ func TestModelsTableForceRefreshMethodsAndFullChain(t *testing.T) {
 
 func TestModelsTableForceRefreshCoalesces(t *testing.T) {
 	f := newForceRefreshFixture(t)
-	if got := requestForceRefresh(f.handler, http.MethodGet, "/models-table"); got.Code != http.StatusOK {
+	if got := requestForceRefresh(f.handler, http.MethodPost, "/models-table/refresh"); got.Code != http.StatusOK {
 		t.Fatal(got.Code)
 	}
 	before := f.nativeCalls.Load()
@@ -260,7 +266,7 @@ func TestModelsTableForceRefreshCoalesces(t *testing.T) {
 
 func TestModelsTableForceRefreshWaiterCancellationDoesNotCancelSharedWork(t *testing.T) {
 	f := newForceRefreshFixture(t)
-	if got := requestForceRefresh(f.handler, http.MethodGet, "/models-table"); got.Code != http.StatusOK {
+	if got := requestForceRefresh(f.handler, http.MethodPost, "/models-table/refresh"); got.Code != http.StatusOK {
 		t.Fatal(got.Code)
 	}
 	before := f.nativeCalls.Load()
@@ -324,6 +330,9 @@ func TestModelsTableForceRefreshHTTPAcceptance(t *testing.T) {
 		return response.StatusCode, string(body)
 	}
 
+	if status, body := do(http.MethodPost); status != http.StatusOK {
+		t.Fatalf("initial refresh: HTTP %d %.300s", status, body)
+	}
 	before := f.nativeCalls.Load()
 	status, body := do(http.MethodGet)
 	if status != http.StatusOK || !strings.Contains(body, "p/m1") || f.nativeCalls.Load() != before {
@@ -372,7 +381,7 @@ func TestModelsTableForceRefreshHTTPAcceptance(t *testing.T) {
 // 匹配旧模型的元数据来自最后成功响应，并提示使用了旧响应；不重放旧表格。
 func TestModelsTableForceRefreshRecomposesFromCachedInputs(t *testing.T) {
 	f := newForceRefreshFixture(t)
-	good := requestForceRefresh(f.handler, http.MethodGet, "/models-table")
+	good := requestForceRefresh(f.handler, http.MethodPost, "/models-table/refresh")
 	if good.Code != http.StatusOK || !strings.Contains(good.Body.String(), "source-v1") {
 		t.Fatal("failed to warm metadata")
 	}

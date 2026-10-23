@@ -55,6 +55,9 @@ func TestModelsTableSSR(t *testing.T) {
 			}
 		}
 	}
+	if warmed := requestForceRefresh(handler, http.MethodPost, "/models-table/refresh"); warmed.Code != http.StatusOK {
+		t.Fatalf("initial refresh failed: %d %s", warmed.Code, warmed.Body.String())
+	}
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, httptest.NewRequest("GET", "/models-table", nil))
 	if w.Code != 200 || !strings.HasPrefix(w.Header().Get("Content-Type"), "text/html") {
@@ -100,7 +103,7 @@ func TestModelsTableSSR(t *testing.T) {
 	// 上游失败是错误HTML，不能伪装成200空目录。
 	fake.nativeStatus = http.StatusBadGateway
 	w = httptest.NewRecorder()
-	handler.ServeHTTP(w, httptest.NewRequest("GET", "/models-table", nil))
+	handler.ServeHTTP(w, httptest.NewRequest("POST", "/models-table/refresh", nil))
 	if w.Code != 502 || !strings.HasPrefix(w.Header().Get("Content-Type"), "text/html") || !strings.Contains(w.Body.String(), "HTTP 502") || strings.Contains(w.Body.String(), "<table") {
 		t.Fatalf("failed catalog did not produce error HTML: HTTP %d %.200s", w.Code, w.Body.String())
 	}
@@ -108,8 +111,8 @@ func TestModelsTableSSR(t *testing.T) {
 
 	cpa.Close()
 	w = httptest.NewRecorder()
-	handler.ServeHTTP(w, httptest.NewRequest("GET", "/models-table", nil))
-	if w.Code != 502 || !strings.Contains(w.Body.String(), "native_manifest_failed") || strings.Contains(w.Body.String(), "<table") {
+	handler.ServeHTTP(w, httptest.NewRequest("POST", "/models-table/refresh", nil))
+	if w.Code != 502 || !strings.Contains(w.Body.String(), "forced_refresh_failed") || strings.Contains(w.Body.String(), "<table") {
 		t.Fatal("transport failure became an empty success page")
 	}
 	save("table-network-error.html", w)

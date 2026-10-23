@@ -19,6 +19,9 @@ func TestExcludeModelsHidesOnlyExactPublicIDs(t *testing.T) {
 	cfg := testCfg()
 	cfg.ExcludeModels = []string{"oauth/m1"}
 	h := newTestHandler(t, cfg, cpa)
+	if response := requestForceRefresh(h, http.MethodPost, "/models-table/refresh"); response.Code != http.StatusOK {
+		t.Fatalf("warm table: HTTP %d", response.Code)
+	}
 	for _, tc := range []struct {
 		path       string
 		wantHidden bool

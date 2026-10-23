@@ -15,7 +15,7 @@ import (
 // 重建的表格必须包含新模型，旧模型保留缓存中的元数据，不重放旧的最终目录。
 func TestPersistentMetadataSurvivesRestartWithNewCPAModel(t *testing.T) {
 	f := newForceRefreshFixture(t)
-	warm := requestForceRefresh(f.handler, http.MethodGet, "/models-table")
+	warm := requestForceRefresh(f.handler, http.MethodPost, "/models-table/refresh")
 	if warm.Code != http.StatusOK || !strings.Contains(warm.Body.String(), "source-v1") {
 		t.Fatalf("warm table lacks metadata: %d %.300s", warm.Code, warm.Body.String())
 	}
@@ -39,7 +39,7 @@ func TestPersistentMetadataSurvivesRestartWithNewCPAModel(t *testing.T) {
 	if err := f.owner.refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	got := requestForceRefresh(f.handler, http.MethodGet, "/models-table")
+	got := requestForceRefresh(f.handler, http.MethodPost, "/models-table/refresh")
 	body := got.Body.String()
 	if got.Code != http.StatusOK || !strings.Contains(body, "p/new") || !strings.Contains(body, "source-v1") {
 		t.Fatalf("restart+outage lost metadata or new CPA model: HTTP %d %.600s", got.Code, body)
@@ -57,7 +57,7 @@ func TestClientDisconnectDoesNotAbortSharedBuild(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		f.handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/models-table", nil).WithContext(ctx))
+		f.handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v1/models?client_version=disconnect", nil).WithContext(ctx))
 	}()
 	select {
 	case <-f.sourceEntered:
@@ -72,7 +72,7 @@ func TestClientDisconnectDoesNotAbortSharedBuild(t *testing.T) {
 
 	before := f.sourceCalls.Load()
 	f.sourceStatus.Store(http.StatusServiceUnavailable)
-	got := requestForceRefresh(f.handler, http.MethodGet, "/models-table")
+	got := requestForceRefresh(f.handler, http.MethodGet, "/v1/models?client_version=disconnect")
 	if got.Code != http.StatusOK || !strings.Contains(got.Body.String(), "source-v1") {
 		t.Fatalf("metadata from abandoned build was not cached: %d %.400s", got.Code, got.Body.String())
 	}

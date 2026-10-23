@@ -486,6 +486,9 @@ func TestCatalogHTTPFixture(t *testing.T) {
 	if status != 200 || json.Unmarshal(plain, &standard) != nil || standard.Object != "list" || len(standard.Data) == 0 {
 		t.Fatalf("sidecar no-version standard projection: %d %.200s", status, plain)
 	}
+	if status, _, _ := requestMethod(http.MethodPost, "127.0.0.3:8080", "/models-table/refresh", false); status != http.StatusOK {
+		t.Fatalf("warm sidecar SSR: HTTP %d", status)
+	}
 	status, page, pageHeaders := request("127.0.0.3:8080", "/models-table", false)
 	if status != 200 || !strings.HasPrefix(pageHeaders.Get("Content-Type"), "text/html") || strings.Count(string(page), "<td") != len(growthRows)*11 || len(page) > 1<<20 || strings.Contains(string(page), "<script") || !strings.Contains(string(page), `action="/models-table/refresh"`) {
 		t.Fatalf("sidecar SSR: HTTP %d, %d bytes, %d cells", status, len(page), strings.Count(string(page), "<td"))
