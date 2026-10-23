@@ -42,20 +42,92 @@ Third apply, explicitly capped as the last allowed attempt, succeeded after a fr
 - At 06:09:53 all 55 project-container identities and all three Compose hashes are unchanged; production/private-config still equal. Recovery regression 22/22 passes.
 - Four real smoke calls, zero retries, all completed with exact SSE/WS new-socket recall. Keeper HTTP 06:10:01/03 and WS 06:10:06/08 each show `stored=true`, `previous=false/true`; correlated Sub2API IDs `863f2aec-37f4-4947-bc83-e21888396b20`, `c54639cc-974a-407e-9aff-dff200ac1ff1`, `9bd10322-a7aa-4c77-b152-93dcfbebd30f`, `162a5822-52df-490d-a065-f2b172637941`. Concurrent unrelated traffic was not counted as smoke.
 
-## Keeper — prepared, not yet deployed
+## Keeper — deployed; 24h observation running
 
-Source/submodule `65ef67cd4cff0d15f7f75c7d338575058f274bd1`; dual-architecture index `sha256:6ae3cc3c4883ca447ee898e82ef52c56398eadb602059eba1a41721280baef1a`. Registry index, both platform manifests/configs and OCI source revisions were independently verified. Defaults/example are `10m / 100 / 0`; private production candidate overrides `24h / 10000 / 0`. Access LRU, write-time TTL and wipe-on-start are unchanged. Old production is actually `10m / 200MiB payload cap / entries unlimited`, not `10m / 100 / 0`.
+Source/submodule `65ef67cd4cff0d15f7f75c7d338575058f274bd1`; dual-architecture index `sha256:6ae3cc3c4883ca447ee898e82ef52c56398eadb602059eba1a41721280baef1a`. Registry index, both platform manifests/configs and OCI source revisions were independently verified. Defaults/example are `10m / 100 / 0`; production `.env` overrides `24h / 10000 / 0`. Access LRU, write-time TTL and wipe-on-start are unchanged. The pre-rollout baseline was `10m / 200MiB payload cap / entries unlimited`, not `10m / 100 / 0`.
 
 The remote monitor `scripts/ops/keeper-observe.py` is bounded to 24h with approximately 60s sampling. It records cache bytes/files, both filesystem free-byte values, RSS, cgroup `memory.current`, `inactive_file`, working set and CPU deltas. Working set is `max(0, current - inactive_file)`. A working-set/RSS sample ≥90% of `memory.max` (about 345.6MiB for keeper's 384MiB limit; fallback 345MiB if unlimited), or a ≥60s CPU mean exceeding `min(1 core, 80% of quota)`, writes an event and stops monitoring **without changing production**. The profile stays experimental if this happens; an operator must review it.
 
 **Only free disk <4GiB can trigger unattended rollback.** Cache ≥1GiB is record-only, with one `cache_1gib_crossed` note: 10000 aliases can legitimately exceed 1GiB. On low free disk alone the monitor attempts keeper-only TTL10m/entries100, same image/bytes0, then exits. It uses the shared front lock, fresh file/container CAS, private backup, rendered two-env-only proof, explicit `--no-deps --no-build --pull never`, and image/environment/health/neighbour readback. Any unknown or drift stops, never loops. Reversion is not guaranteed to reclaim disk occupied by other services or bbolt high-water pages.
 
-Samples, baseline and `/var/lib/ai-gateway-keeper-observe/EVENT.json` are 0600 in a 0700 directory. Event receipts include current Compose/environment hashes and a private-config re-adoption command; the coordinator checks them, without a push notifier. Completion counts follow requested log definitions (`previous=true status=200` hit proxy, `previous=true status=400` miss proxy, `previous=false` full-history/new-turn proxy, stored flags, last-reported alias/byte values). These are not proof of actual expanded history or successful model output: WS status200 can include an upstream error, and a new turn also has `previous=false`. Client bytes avoided cannot be measured from these logs. Baseline and window carry the known **04:47–04:59 UTC** 429-outlier interval separately.
+Samples and baseline are 0600 in a 0700 directory; `/var/lib/ai-gateway-keeper-observe/EVENT.json` is written 0600 on a stop/revert/end (absent while observing normally). Event receipts include current Compose/environment hashes and a private-config re-adoption command; the coordinator checks them, without a push notifier. Completion counts follow requested log definitions (`previous=true status=200` hit proxy, `previous=true status=400` miss proxy, `previous=false` full-history/new-turn proxy, stored flags, last-reported alias/byte values). These are not proof of actual expanded history or successful model output: WS status200 can include an upstream error, and a new turn also has `previous=false`. Client bytes avoided cannot be measured from these logs. Baseline and window carry the known **04:47–04:59 UTC** 429-outlier interval separately.
 
 Offline monitor tests 12/12 pass, including record-only 1GiB crossing, page-cache exclusion, working-set stop, CPU stop, one-shot disk fallback and CAS refusal. Mutations that authorize memory rollback, omit CAS or count inactive page cache as working memory are rejected. Updated keeper gofmt/test/race/vet and full template validation pass with ambient `CPA_API_KEY` cleared. The initial offline fixture had an incorrect argv suffix assertion, corrected before these passes; no production/inference calls were involved.
 
-Deployment and actual remote arming still pending at this checkpoint. The local notifier was dropped before implementation; none was built or armed. Source CI success is not production acceptance.
+### Actual deployment and bounded completion
+
+- Plan approved digest `50f56c44301a098980b5b2fdda93fa7f2e288eaf108171f4cfbda1cd0f372063`. Keeper activated **06:49:27 UTC**, container `735f50dc89b6`, with exact pin/revision and `STORE_TTL=24h`, `STORE_MAX_ENTRIES=10000`, `STORE_MAX_BYTES=0`. Namespace remains `net:[4026532500]`, owner `c6c96e158b02`; all 54 neighbours retain ID/image/StartedAt. Resources remain memory/swap384MiB, CPU0.5, PID64, read-only, GOMEMLIMIT256MiB.
+- The local Ansible controller hit its **300s overall timeout after activation**, before writing its final receipt or releasing its lock. **No Ansible exit0 is claimed.** No second apply was run. Supervisor independently confirmed healthy candidate and approved bounded completion, rather than a destructive second wipe. Readbacks verified image/revision/env/namespace/all neighbours, exact production/candidate/private hashes, private snapshot permissions and absence of local/remote controllers. The empty root-owned lock inode264357 was created **06:46:30Z**, within this transaction and before activation; its inode/ctime were rechecked before removal.
+- Snapshot `/root/AI-gateway/.ai-ops-state/front-openai-api-cache-keeper-hg8udcya` is 0700; old configuration files are 0600. Explicit `recovered-controller-timeout.json` receipt was written there at **06:59:22Z**, recording `ansible_exit_code=null`, checks, hashes and lock release. Only this batch's stale `.env.baseline` (`dbba9133…`→`aabb67d5…`) and `compose.yaml.baseline` (`b627271a…`→`212d6695…`) were backed up and CAS-adopted from live files. Override baseline and keeper last-pointer already matched. Historical snapshots and bridge last-pointer were preserved.
+- First smoke attempted TLS handshake only, failed with `SSL: UNEXPECTED_EOF_WHILE_READING`, and never reached HTTP or returned a response ID: **call0**. It was not silently retried. Supervisor checked healthy real traffic/public reachability and granted one fresh four-call budget. That budget passed, without inference retries or model changes: SSE3.364s/2.307s, WS2.838s/4.386s, exact marker recall on a new WS socket, all completed. Keeper HTTP **07:02:44/46** and WS **07:02:49/54** are paired previous=false/true and stored=true; correlated Sub2API IDs `849e3432-c009-4108-b72f-9bee382382af`, `cd9bc41e-275e-4bdd-b62f-746c45b188e0`, `7dbe6969-ef67-43a2-ab47-67bd291e1c96`, `319c1b79-cb80-4ce3-8d74-c4a822375249`.
+- Natural-traffic checkpoint **06:49:27–07:02:56Z**: 95 completion logs including those four smoke calls (91 other turns), 51 parent requests/status200, zero status400 parent misses; stored=true93/false2. These status proxies do not prove that all 95 model outputs succeeded.
+- Three production files re-adopted with rsync at **07:09:07Z**, then SHA256 equality checked. Final stack dry-run has no pending create/recreate/start/pull/build. Gateway startup unit remains active/success; recovery timer remains active. Production hashes: compose `212d6695a8a538b6eadcdb272a80231b6643f95078fb7d0edde0aa0d33019de4`, override `b3f46dcb7c8284845ecf247b1f225c4e7dff08684aa4b09d9e68822249ae6521`, `.env` `aabb67d553429f0f6259c9f9ea2d3be7339c58a8424b38f7783743d0b3532c8d`. This does **not** assert equality of all managed files; see historical debt below.
+
+### Armed remote monitor
+
+Unit **`ai-gateway-keeper-observe-20261023.service`**, observation **2026-10-23 07:05:35Z → 2026-10-24 07:05:35Z**. Unit RuntimeMax is 24h+5min solely for bounded final sampling/fallback completion; the observation window is 24h. Monitor is root-only, CPUQuota10%, MemoryMax192MiB, UMask0077, no restart loop. Installed script SHA256 `6b2c40e257bb567a7b88d761ed69a5b00174aa92895f2eabbdd58d674061bdf1` equals committed source. State directory `/var/lib/ai-gateway-keeper-observe` is 0700; `monitor.py`, `arm.json`, `BASELINE.json`, `samples.jsonl` are 0600. First sample and subsequent CPU/log samples were read back; no revert attempt/event at the checkpoint below. The local notifier was dropped before implementation; none was built or armed.
+
+A `finished` event does not restore limits automatically. Memory/CPU/drift/error exits stop protection without changing the experimental profile. The coordinator must inspect the event and decide the next deployment; no new long-term safety claim is made.
+
+Inspect (read-only):
+
+```sh
+ssh root@100.94.238.35 'systemctl status ai-gateway-keeper-observe-20261023.service --no-pager; tail -n 2 /var/lib/ai-gateway-keeper-observe/samples.jsonl; if test -f /var/lib/ai-gateway-keeper-observe/EVENT.json; then cat /var/lib/ai-gateway-keeper-observe/EVENT.json; fi'
+```
+
+Cancel only when no front transaction is in progress. This stops monitoring, **not** the 24h/10000/0 profile; it does not restore history or parameters:
+
+```sh
+ssh root@100.94.238.35 'test ! -d /root/AI-gateway/.ai-ops-state/front-component.lock && systemctl stop ai-gateway-keeper-observe-20261023.service'
+```
+
+After any automatic revert, first compare live hashes with the 0600 event receipt; then re-adopt (run on the controller), and independently compare the three source/destination hashes again:
+
+```sh
+rsync -a --chmod=F600,D700 root@100.94.238.35:/root/AI-gateway/{compose.yaml,compose.override.yaml,.env} /home/xz/Code/ai/AI-gateway/ansible/private-config/
+```
+
+Raise keeper/bridge caller timeouts and retain partial stdout on timeout as follow-up. Generic file-baseline advancement and durable success/failure receipts/finally cleanup also need a separate transaction improvement. Front profiles already have an `always` unlock, but killing the controller bypasses it; a normal-task `always` alone cannot guarantee recovery from controller death.
+
+Source/policy pin `d43893e` exact-tip [Validate39912843418](https://github.com/xz-dev/AI-gateway/actions/runs/39912843418) passed both jobs before the approved plan. Final documentation-tip CI and lease handoff are recorded in the local Chinese report `/var/tmp/deploy-batch-20261023/REPORT.md`.
 
 ## Limits
 
 No second VM boot, real rollback drill, formal 0.5-core CPU acceptance, long soak, or standards certification. Messages remains disabled; Sub2API, account modes, slash routing and keeper LRU are unchanged. Keeper startup still clears aliases; later long TTL will not survive a process restart. The production observation must have stop thresholds and an explicit owner before being armed.
+
+## Value versus cost — preliminary checkpoint
+
+| Metric | Old baseline | New bounded observation checkpoint |
+|---|---|---|
+| Profile | 10m TTL / entries unlimited / 200MiB cap | 24h TTL / 10000 aliases / bytes0 |
+| Measured period | 03:33:00–06:45:14Z retained logs | 07:05:35–07:10:41Z, 6 samples only |
+| Completion logs | 1829 | 5 |
+| Hit proxy / parent attempts | 954/964 = 98.96% | 5/5 = 100.00% |
+| Excluding 04:47–04:59Z outlier | 932/940 = 99.15% | No overlap; same 5/5 |
+| Unknown-parent miss proxy | 6 | 0 |
+| Full-history/new-turn proxy | 865 | 0 |
+| stored true / false | 1719 / 110 | 5 / 0 |
+| Last logged aliases / store_bytes | 76 / 6224181 | 110 / 5619771 |
+| Actual client bytes avoided | Not measured; log has no byte counts | Not measured; do not substitute store_bytes |
+| Cache directory bytes/files | 32.27MiB / 5 (end only) | 30.90MiB / 4 (window max) |
+| Free root/docker filesystem | 6.972GiB (end) | 6.974GiB (window min) |
+| RSS | 11.57MiB (end; not historical peak) | 13.21MiB (window max) |
+| Working set | 8.73MiB (end) | 14.58MiB (window max) |
+| CPU cores | 0.03820 lifetime mean since 03:33:44 | 0.00812 mean / 0.01543 max of 60s windows |
+
+Hit ratio above is the requested `previous=true status200 / all previous=true completions` proxy, not a verified cache lookup or model-success ratio. Outlier interval contains 40 completion logs (24 parent attempts, 22 status200, 2 status400; stored true/false 12/28); that is **not** a claim that all 40 were 429. It includes concurrent traffic in the known upstream-429 period. Old cost is one end checkpoint, not old peaks; old CPU is cgroup lifetime CPU/uptime. New CPU uses actual sampled deltas, not formal 0.5-core throughput/latency acceptance. Traffic volume and durations differ greatly; these are not matched A/B workloads.
+
+The old proxy already exceeds 99% outside the outlier. Five new parent completions cannot show a durable improvement. Neither a larger TTL nor a 10000-alias cap is proved optimal; the old production alias count was unlimited, so this is not a production 100→10000 comparison. The reasonable decision is a bounded experiment with a free-disk exit, not “bigger is always better.” Wait for the full window and request byte telemetry separately before quantifying saved client traffic; no keeper-binary instrumentation was added here.
+
+## Six historical baseline debts — intentionally not adopted
+
+Only this batch’s compose/.env baselines were repaired. No runtime/configuration content changed during that repair. Historical snapshot/bridge pointer hashes are not rewritten to pretend they describe the later keeper deployment.
+
+| Live path | Recorded baseline SHA256 | Current live SHA256 | private-config / likely origin |
+|---|---|---|---|
+| `apisix-models/config.yaml` | `f718077f27ceb23180b8da6f1f27a664087451e8b31a7d057747a6cfbc9a6c64` | `b9c26a41fa43a77164c612fcfa7738af6244a460864eea1906c991681c8cc172` | Not covered by private-config (public tracked input). Tracked source equals live; 4f851db (2026-10-22 routing_lkg cleanup). |
+| `apisix-models/apisix.yaml` | `9ada163cdafa8cf7c08096702817922387406e67e6e107317f3768f1758d036d` | `90a1d0398a388800ad3f940a7903c7f02495984501471f1f506fe56cc1dacc6c` | Not covered by private-config (public tracked input). Tracked source equals live; b112be3 (2026-10-22 front-cache routing). |
+| `apisix-models/routing_selector.lua` | `e5fe09bbba231d90406a197e587269fb9bd2b6edacf392647d815f3c2737f1a5` | `5e727da9e991201509c52d46324c8422f1a4868fdc2371512aa8cad3e90504d9` | Not covered by private-config (public tracked input). Tracked source equals live; 63b0717 (2026-10-22 slash routing). |
+| `aisix/config.yaml` | `2acd69a7fdbe58acd5b4a5d2796f9085e0a7ef4aa70c8e63bdf8869837afdc0b` | `943fb9851460dbf471567f0b470d0af768df21defbcf441eda295784dbb20f8c` | Does not equal live. Origin not established in this deployment; separate review required. |
+| `aisix/resources.yaml` | `855a9721394013ce0954d6768c65856970947648ec47d103e7b085c81f67a7d7` | `9fc3f6c84b230174c43cc307a2c51b64f0540b748baf313247ca31c3f4761c84` | Does not equal live. Origin not established in this deployment; separate review required. |
+| `data/cpa/conf/config.yaml` | `ee897302abc7c30e8f8ef035aa9d754082dd954af287118894861e1a78f4665c` | `f366c2127d71db064162e5dd69e5a846e686c21259300385a4690ebb9e0df359` | Does not equal live. Origin not established in this deployment; separate review required. |
