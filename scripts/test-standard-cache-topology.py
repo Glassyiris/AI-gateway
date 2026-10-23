@@ -4,8 +4,10 @@
 import ast
 import copy
 import ipaddress
+import json
 import re
 import subprocess
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -170,6 +172,59 @@ class StandardCacheTopology(unittest.TestCase):
             if path.name != "preflight.yml":
                 for tag in retired[3:]:
                     self.assertNotIn(tag, path.read_text(), path)
+
+    def test_front_profiles_reject_unrelated_or_unpinned_changes(self):
+        tasks = (ROOT / "ansible/roles/ai_ops/tasks/front-component.yml").read_text()
+        program = textwrap.dedent(tasks.split("      - |\n", 1)[1].split("    stdin:", 1)[0])
+        keeper, bridge = "openai-api-cache-keeper", "responses-ws-sse-bridge"
+        for service, expected in (
+            (keeper, {"LISTEN_ADDR": "127.0.0.1:8085", "UPSTREAM_URL": "http://127.0.0.1:8086", "IGNORE_CLIENT_STORE_FALSE": "true"}),
+            (bridge, {"LISTEN_ADDR": "127.0.0.1:8086", "PORT": "8086", "UPSTREAM_URL": "http://sub2api-ai-sse-relay:8080"}),
+        ):
+            config = {"services": {service: {
+                "image": "ghcr.io/xz-dev/" + service + ":" + "a" * 40 + "@sha256:" + "b" * 64,
+                "environment": expected, "network_mode": "service:ai-sse-keepalive-proxy-netns"},
+                "apisix": {"image": "unchanged"}}, "volumes": {"retained": {}}}
+            candidate = copy.deepcopy(config)
+            candidate["services"][service]["image"] = config["services"][service]["image"].replace("b" * 64, "c" * 64)
+            candidate["services"][service]["environment"]["GOMEMLIMIT"] = "192MiB"
+
+            def check(value, accepted):
+                result = subprocess.run(["python3", "-c", program], input=json.dumps({
+                    "service": service, "current": config, "candidate": value, "expected_env": expected}),
+                    text=True, capture_output=True, timeout=3)
+                self.assertEqual(result.returncode == 0, accepted, result.stderr)
+                self.assertNotIn("secret-fixture", result.stdout + result.stderr)
+
+            check(candidate, True)
+            for fault in ("unrelated", "volume", "public", "wrong-port", "tag", "routing", "capabilities"):
+                bad = copy.deepcopy(candidate)
+                target = bad["services"][service]
+                if fault == "unrelated":
+                    bad["services"]["apisix"]["environment"] = {"PASSWORD": "secret-fixture"}
+                elif fault == "volume":
+                    bad["volumes"] = {}
+                elif fault == "public":
+                    target["ports"] = ["8086:8086"]
+                elif fault == "wrong-port":
+                    target["environment"]["LISTEN_ADDR"] = "127.0.0.1:8080"
+                elif fault == "tag":
+                    target["image"] = "ghcr.io/xz-dev/" + service + ":latest"
+                elif fault == "routing":
+                    target["environment"]["CPA_API_KEY"] = "secret-fixture"
+                elif fault == "capabilities":
+                    target["cap_add"] = ["NET_ADMIN"]
+                with self.subTest(service=service, fault=fault):
+                    check(bad, False)
+        profiles = (ROOT / "ansible/roles/ai_ops/defaults/main.yml").read_text()
+        for service in (keeper, bridge):
+            self.assertRegex(profiles, rf"\n  {service}:\n    front_cache: true\n")
+        self.assertIn("--no-deps --no-build --pull never {{ service }}", tasks)
+        self.assertIn("env -i PATH=\"$PATH\"", tasks)
+        self.assertLess(tasks.index("Require the exact approved front plan"), tasks.index("Pull only the exact pinned"))
+        self.assertLess(tasks.index("Refuse changed live state immediately before"), tasks.index("Upload or restore only"))
+        self.assertIn("mode: '0700'", tasks)
+        self.assertIn("mode: '0600'", tasks)
 
     def test_operator_uses_shared_keepalive_not_public_apisix(self):
         owner = section(self.compose, "  operator-host-netns:\n")

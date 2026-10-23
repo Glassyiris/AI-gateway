@@ -372,6 +372,24 @@
           tags: [deploy-recovery]
       tags: [deploy-recovery]
 
+    # Front components use the same public deploy/rollback operations, with a
+    # private grouped snapshot and single-service CAS instead of legacy uploads.
+    - name: Run guarded front component operation selected by profile
+      ansible.builtin.include_role:
+        name: ai_ops
+        tasks_from: front-component
+        apply:
+          tags: [deploy, rollback]
+      vars:
+        _front_operation: "{{ 'rollback' if 'rollback' in ansible_run_tags else 'deploy' }}"
+      when: ai_ops_profiles.get(service | default(''), {}).get('front_cache', false)
+      tags: [deploy, rollback]
+
+    - name: Finish front component operation before legacy component tasks
+      ansible.builtin.meta: end_host
+      when: ai_ops_profiles.get(service | default(''), {}).get('front_cache', false)
+      tags: [deploy, rollback]
+
     # ======================= deploy (component) =======================
     - name: Deploy compose.yaml
       ansible.builtin.include_role:

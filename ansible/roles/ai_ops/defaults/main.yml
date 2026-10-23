@@ -38,6 +38,18 @@ ai_ops_profiles:
   aisix: {}
   cloudflared: {}
   ai-sse-keepalive-proxy: {}
+  openai-api-cache-keeper:
+    front_cache: true
+    env:
+      LISTEN_ADDR: '127.0.0.1:8085'
+      UPSTREAM_URL: 'http://127.0.0.1:8086'
+      IGNORE_CLIENT_STORE_FALSE: 'true'
+  responses-ws-sse-bridge:
+    front_cache: true
+    env:
+      LISTEN_ADDR: '127.0.0.1:8086'
+      PORT: '8086'
+      UPSTREAM_URL: 'http://sub2api-ai-sse-relay:8080'
   provider-sidecar: {}
   aisix-status: {}
   models-enricher: {}
@@ -51,6 +63,14 @@ ai_ops_profiles:
   # Squid is built locally on the host from egress-proxy/; never pulled.
   egress-proxy:
     pull: false
+
+# Front component operations need Docker Compose v2 on the controller for an
+# offline, secret-suppressed candidate render. No local Docker daemon is used.
+ai_ops_local_compose_cmd: docker compose
+# Plan identity binds all three candidate/live file hashes and container IDs.
+ai_ops_front_approved_digest: ''
+ai_ops_front_verify_retries: 30
+ai_ops_front_verify_delay_seconds: 2
 
 # Model-sync deploy: exact preview digest approved from ai_ops_mode=plan.
 ai_ops_model_sync_approved_digest: ""

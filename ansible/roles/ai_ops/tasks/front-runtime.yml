@@ -1,0 +1,63 @@
+---
+# Read-only, allowlisted fields only: full inspect/environment never enters output.
+- name: Read front component and protected container identities
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import json, os, subprocess, sys
+        runtime, project, service = sys.argv[1:]
+        def docker(*args):
+            return subprocess.check_output([runtime, *args], stderr=subprocess.DEVNULL, timeout=15).decode()
+        try:
+            ids = docker('ps', '-aq', '--filter', 'label=com.docker.compose.project=' + project).split()
+            containers = json.loads(docker('inspect', *ids))
+            indexed = {}
+            for c in containers:
+                labels = c['Config'].get('Labels') or {}
+                name = labels.get('com.docker.compose.service')
+                if name == service or name == 'ai-sse-keepalive-proxy-netns':
+                    assert c['Name'] == '/' + project + '-' + name + '-1'
+                    assert name not in indexed
+                    indexed[name] = c
+            target, owner = indexed[service], indexed['ai-sse-keepalive-proxy-netns']
+            def identity(c):
+                return {'id': c['Id'], 'image': c['Image'], 'started': c['State']['StartedAt'],
+                        'running': c['State'].get('Running', False), 'paused': c['State'].get('Paused', False),
+                        'restarting': c['State'].get('Restarting', False)}
+            def netns(c):
+                return os.stat('/proc/' + str(c['State']['Pid']) + '/ns/net').st_ino if c['State'].get('Running') and c['State']['Pid'] > 0 else None
+            env = dict(e.split('=', 1) for e in target['Config'].get('Env') or [])
+            state = target['State']
+            print(json.dumps({
+                'identity': {'target': identity(target), 'owner': identity(owner),
+                    'protected': {c['Id']: identity(c) for c in containers if c['Id'] != target['Id']}},
+                'target': {'image': target['Image'], 'image_ref': target['Config']['Image'],
+                    'running': state.get('Running', False), 'paused': state.get('Paused', False),
+                    'restarting': state.get('Restarting', False),
+                    'health': state.get('Health', {}).get('Status', 'missing'),
+                    'network_mode': target['HostConfig']['NetworkMode'], 'netns': netns(target),
+                    'env': {k: env[k] for k in ('PORT', 'LISTEN_ADDR', 'UPSTREAM_URL', 'IGNORE_CLIENT_STORE_FALSE') if k in env}},
+                'owner': {'id': owner['Id'], 'running': owner['State'].get('Running', False), 'netns': netns(owner)}
+            }))
+        except (AssertionError, KeyError, OSError, ValueError, subprocess.SubprocessError):
+            sys.exit('front component identity read failed; no mutation authorized')
+      - "{{ _runtime }}"
+      - "{{ ai_ops_compose_project }}"
+      - "{{ service }}"
+  register: _front_runtime_raw
+  no_log: true
+  changed_when: false
+  retries: "{{ ai_ops_front_verify_retries if _front_wait | default(false) else 1 }}"
+  delay: "{{ ai_ops_front_verify_delay_seconds }}"
+  until: >-
+    _front_runtime_raw.rc == 0 and
+    (not (_front_wait | default(false)) or
+     ((_front_runtime_raw.stdout | from_json).target.running and
+      (_front_runtime_raw.stdout | from_json).target.health == 'healthy'))
+
+- name: Parse front component identities
+  ansible.builtin.set_fact:
+    _front_runtime: "{{ _front_runtime_raw.stdout | from_json }}"
+  no_log: true
