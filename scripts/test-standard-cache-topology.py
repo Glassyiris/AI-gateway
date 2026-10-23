@@ -97,7 +97,7 @@ class StandardCacheTopology(unittest.TestCase):
         ops = (ROOT / "ansible/ops.yml").read_text()
         generic = ops.split("# ======================= deploy (component) =======================", 1)[1].split("# ======================= deploy-squid", 1)[0]
         prepare, recreate = generic.split('- name: "Recreate only {{ service }}"', 1)
-        self.assertIn('{{ _compose }} pull {{ service }}', prepare)
+        self.assertIn('{{ _compose }} pull --policy always {{ service }}', prepare)
         self.assertIn("ai_ops_profiles[service].get('pull', true) | bool", prepare)
         self.assertIn("not (ai_ops_profiles[service].get('pull', true) | bool)", prepare)
         self.assertIn('{{ _runtime }} image inspect "$image"', prepare)

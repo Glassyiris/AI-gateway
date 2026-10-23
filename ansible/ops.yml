@@ -429,7 +429,7 @@
       tags: [deploy]
 
     - name: "Pull exact image for {{ service }}"
-      ansible.builtin.command: "{{ _compose }} pull {{ service }}"
+      ansible.builtin.command: "{{ _compose }} pull --policy always {{ service }}"
       when:
         - ai_ops_mode != "plan"
         - ai_ops_profiles[service].get('pull', true) | bool
