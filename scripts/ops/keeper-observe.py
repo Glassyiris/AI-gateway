@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One bounded keeper experiment; only disk thresholds authorize a one-shot revert."""
+"""One bounded keeper experiment; only low free disk authorizes a one-shot revert."""
 import datetime as dt
 import hashlib
 import json
@@ -174,8 +174,6 @@ def resources(c):
 
 def breaches(sample):
     reasons = []
-    if sample['cache_bytes'] >= GIB:
-        reasons.append('cache')
     if min(sample['free_bytes'].values()) < 4 * GIB:
         reasons.append('free_disk')
     if max(sample['working_set_bytes'], sample['rss_bytes']) >= sample['memory_stop_bytes']:
@@ -186,7 +184,7 @@ def breaches(sample):
 
 
 def disk_only(reasons):
-    return bool(reasons) and set(reasons) <= {'cache', 'free_disk'}
+    return reasons == ['free_disk']
 
 
 def fallback_env(text):
@@ -278,6 +276,7 @@ def observe():
     finish = time.monotonic() + max(0, (end - now()).total_seconds())
     previous, previous_time, cursor = None, None, start
     last_entries = last_bytes = None
+    cache_note_written = False
     try:
         while True:
             tick = time.monotonic()
@@ -301,6 +300,9 @@ def observe():
             sample = {'start': stamp(cursor), 'end': stamp(until), 'resources': cost, 'activity': value,
                       'outlier_interval': OUTLIER, 'client_avoided_bytes': None}
             cursor = until
+            if cost['cache_bytes'] >= GIB and not cache_note_written:
+                sample['notes'] = ['cache_1gib_crossed']
+                cache_note_written = True
             with (STATE / 'samples.jsonl').open('a') as f:
                 os.fchmod(f.fileno(), 0o600)
                 f.write(json.dumps(sample, sort_keys=True) + '\n')

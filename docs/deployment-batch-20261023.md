@@ -42,9 +42,19 @@ Third apply, explicitly capped as the last allowed attempt, succeeded after a fr
 - At 06:09:53 all 55 project-container identities and all three Compose hashes are unchanged; production/private-config still equal. Recovery regression 22/22 passes.
 - Four real smoke calls, zero retries, all completed with exact SSE/WS new-socket recall. Keeper HTTP 06:10:01/03 and WS 06:10:06/08 each show `stored=true`, `previous=false/true`; correlated Sub2API IDs `863f2aec-37f4-4947-bc83-e21888396b20`, `c54639cc-974a-407e-9aff-dff200ac1ff1`, `9bd10322-a7aa-4c77-b152-93dcfbebd30f`, `162a5822-52df-490d-a065-f2b172637941`. Concurrent unrelated traffic was not counted as smoke.
 
-## Remaining steps
+## Keeper — prepared, not yet deployed
 
-Keeper `24h / 10000 / 0` deployment and remote observation are still pending at this checkpoint. The local notifier was explicitly dropped before implementation; none was built or armed. Source CI success is not production acceptance.
+Source/submodule `65ef67cd4cff0d15f7f75c7d338575058f274bd1`; dual-architecture index `sha256:6ae3cc3c4883ca447ee898e82ef52c56398eadb602059eba1a41721280baef1a`. Registry index, both platform manifests/configs and OCI source revisions were independently verified. Defaults/example are `10m / 100 / 0`; private production candidate overrides `24h / 10000 / 0`. Access LRU, write-time TTL and wipe-on-start are unchanged. Old production is actually `10m / 200MiB payload cap / entries unlimited`, not `10m / 100 / 0`.
+
+The remote monitor `scripts/ops/keeper-observe.py` is bounded to 24h with approximately 60s sampling. It records cache bytes/files, both filesystem free-byte values, RSS, cgroup `memory.current`, `inactive_file`, working set and CPU deltas. Working set is `max(0, current - inactive_file)`. A working-set/RSS sample ≥90% of `memory.max` (about 345.6MiB for keeper's 384MiB limit; fallback 345MiB if unlimited), or a ≥60s CPU mean exceeding `min(1 core, 80% of quota)`, writes an event and stops monitoring **without changing production**. The profile stays experimental if this happens; an operator must review it.
+
+**Only free disk <4GiB can trigger unattended rollback.** Cache ≥1GiB is record-only, with one `cache_1gib_crossed` note: 10000 aliases can legitimately exceed 1GiB. On low free disk alone the monitor attempts keeper-only TTL10m/entries100, same image/bytes0, then exits. It uses the shared front lock, fresh file/container CAS, private backup, rendered two-env-only proof, explicit `--no-deps --no-build --pull never`, and image/environment/health/neighbour readback. Any unknown or drift stops, never loops. Reversion is not guaranteed to reclaim disk occupied by other services or bbolt high-water pages.
+
+Samples, baseline and `/var/lib/ai-gateway-keeper-observe/EVENT.json` are 0600 in a 0700 directory. Event receipts include current Compose/environment hashes and a private-config re-adoption command; the coordinator checks them, without a push notifier. Completion counts follow requested log definitions (`previous=true status=200` hit proxy, `previous=true status=400` miss proxy, `previous=false` full-history/new-turn proxy, stored flags, last-reported alias/byte values). These are not proof of actual expanded history or successful model output: WS status200 can include an upstream error, and a new turn also has `previous=false`. Client bytes avoided cannot be measured from these logs. Baseline and window carry the known **04:47–04:59 UTC** 429-outlier interval separately.
+
+Offline monitor tests 12/12 pass, including record-only 1GiB crossing, page-cache exclusion, working-set stop, CPU stop, one-shot disk fallback and CAS refusal. Mutations that authorize memory rollback, omit CAS or count inactive page cache as working memory are rejected. Updated keeper gofmt/test/race/vet and full template validation pass with ambient `CPA_API_KEY` cleared. The initial offline fixture had an incorrect argv suffix assertion, corrected before these passes; no production/inference calls were involved.
+
+Deployment and actual remote arming still pending at this checkpoint. The local notifier was dropped before implementation; none was built or armed. Source CI success is not production acceptance.
 
 ## Limits
 

@@ -712,7 +712,7 @@ services:
   openai-api-cache-keeper:
     build:
       context: ./middleware/openai-api-cache-keeper
-    image: ${OPENAI_API_CACHE_KEEPER_IMAGE:-ghcr.io/xz-dev/openai-api-cache-keeper:fe746f7b1275e6938ceac04e70ef6efbe2129878@sha256:80429f8f213e917d9f142ee39929970f217490682e57ce3f87fd17f48b358d8d}
+    image: ${OPENAI_API_CACHE_KEEPER_IMAGE:-ghcr.io/xz-dev/openai-api-cache-keeper:65ef67cd4cff0d15f7f75c7d338575058f274bd1@sha256:6ae3cc3c4883ca447ee898e82ef52c56398eadb602059eba1a41721280baef1a}
     pull_policy: build
     user: "65534:65534"
     network_mode: service:ai-sse-keepalive-proxy-netns
@@ -739,7 +739,8 @@ services:
       STORE_DIR: /var/tmp/openai-api-cache-keeper
       GOMEMLIMIT: ${OPENAI_API_CACHE_KEEPER_GOMEMLIMIT:-256MiB}
       STORE_TTL: ${OPENAI_API_CACHE_KEEPER_STORE_TTL:-10m}
-      STORE_MAX_BYTES: ${OPENAI_API_CACHE_KEEPER_STORE_MAX_BYTES:-209715200}
+      STORE_MAX_ENTRIES: ${OPENAI_API_CACHE_KEEPER_STORE_MAX_ENTRIES:-100}
+      STORE_MAX_BYTES: ${OPENAI_API_CACHE_KEEPER_STORE_MAX_BYTES:-0}
       REQUIRE_NO_DEFAULT_ROUTE: "true"
     healthcheck:
       test: [CMD, /openai-api-cache-keeper, healthcheck]

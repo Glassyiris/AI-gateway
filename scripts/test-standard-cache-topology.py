@@ -79,6 +79,10 @@ class StandardCacheTopology(unittest.TestCase):
         self.assertNotIn("tmpfs:", keeper)
         self.assertNotIn("    ports:", keeper)
         self.assertNotIn("    networks:", keeper)
+        example = (ROOT / ".env.example").read_text()
+        for name, value in (("STORE_TTL", "10m"), ("STORE_MAX_ENTRIES", "100"), ("STORE_MAX_BYTES", "0")):
+            self.assertIn(f"{name}: ${{OPENAI_API_CACHE_KEEPER_{name}:-{value}}}", keeper)
+            self.assertIn(f"OPENAI_API_CACHE_KEEPER_{name}={value}\n", example)
 
     def test_bridge_is_stateless_private_and_bounded(self):
         bridge = section(self.compose, "  responses-ws-sse-bridge:\n")

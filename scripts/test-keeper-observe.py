@@ -46,7 +46,7 @@ class ObservationTests(unittest.TestCase):
         self.assertEqual(m.breaches(s), ['free_disk'])
         self.assertTrue(m.disk_only(m.breaches(s)))
         s['cache_bytes'] = m.GIB
-        self.assertEqual(m.breaches(s), ['cache', 'free_disk'])
+        self.assertEqual(m.breaches(s), ['free_disk'])
         s['working_set_bytes'] = s['memory_stop_bytes']
         self.assertFalse(m.disk_only(m.breaches(s)))
         self.assertIn('memory', m.breaches(s))
@@ -164,6 +164,21 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual((self.state/'EVENT.json').stat().st_mode & 0o777, 0o600)
         self.assertEqual((self.root/'.env').read_text(), ENV)
 
+    def test_large_cache_is_record_only_and_one_note_does_not_stop_window(self):
+        m.write_json(self.state/'arm.json', self.arm)
+        cost = normal()
+        cost['cache_bytes'] = m.GIB
+        self.assertEqual(m.breaches(cost), [])
+        with mock.patch.object(m, 'inspect_target', return_value=self.c), mock.patch.object(m, 'resources', return_value=cost), mock.patch.object(m, 'activity', return_value=m.summarize([], m.now(), m.now())), mock.patch.object(m, 'revert') as revert, mock.patch.object(m.time, 'sleep') as sleep, mock.patch.object(m.time, 'monotonic', side_effect=[0, 0, 1, 1, 60, 181]):
+            self.assertEqual(m.observe(), 0)
+            revert.assert_not_called()
+            sleep.assert_called_once()
+        samples = [json.loads(l) for l in (self.state/'samples.jsonl').read_text().splitlines()]
+        self.assertEqual(len(samples), 2)
+        self.assertEqual(samples[0]['notes'], ['cache_1gib_crossed'])
+        self.assertNotIn('notes', samples[1])
+        self.assertEqual(json.loads((self.state/'EVENT.json').read_text())['event'], 'finished')
+
     def test_restart_or_oom_has_explicit_event_and_no_monitor_mutation(self):
         m.write_json(self.state/'arm.json', self.arm)
         self.c['RestartCount'], self.c['State']['OOMKilled'] = 1, True
@@ -177,7 +192,7 @@ class TransactionTests(unittest.TestCase):
     def test_disk_breach_is_one_attempt_and_receipt_has_production_hashes(self):
         m.write_json(self.state/'arm.json', self.arm)
         cost = normal()
-        cost['cache_bytes'] = m.GIB
+        cost['free_bytes']['/'] = 4*m.GIB - 1
         with mock.patch.object(m, 'inspect_target', return_value=self.c), mock.patch.object(m, 'resources', return_value=cost), mock.patch.object(m, 'activity', return_value=m.summarize([], m.now(), m.now())), mock.patch.object(m, 'revert', return_value={'after': {}, 'production_hashes': self.expected['hashes']}) as revert:
             self.assertEqual(m.observe(), 0)
             revert.assert_called_once_with(self.arm)
