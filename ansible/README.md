@@ -174,7 +174,16 @@ Only the selected service's **image/environment** may change. All other effectiv
 Compose settings, mounts, resource limits, dependencies, networks and services
 must remain identical. Registry images require a SHA256 digest; keeper and bridge
 also require a 40-character source revision. Explicit preload-only profiles may
-use their existing local tag, with its image ID bound into the approval. Keeper stays `UPSTREAM_URL=http://127.0.0.1:8086` with
+use their existing local tag, with its image ID bound into the approval.
+`cloudflared`, `cpa-model-sync` and `egress-proxy` are preload-only (`pull: false`).
+Production cloudflared uses a `rollback-20261015/...` archive alias: its local
+image ID is not the public registry image's config ID, even though the alias
+carries the public index digest. Do not replace it with a registry ref without
+proving identical local image identity in a separately reviewed migration.
+The image preflight rejects `rollback-*` and `localhost/` aliases in any
+pull-enabled profile, even when a local digest matches; a local match does not
+prove that a registry can resolve the alias. Missing preload images fail closed
+without contacting a registry. Keeper stays `UPSTREAM_URL=http://127.0.0.1:8086` with
 `IGNORE_CLIENT_STORE_FALSE=true`; bridge stays loopback `:8086` with `PORT=8086`.
 Neither profile can add provider credentials or routing. Compose runs with a
 clean process environment so ambient shell exports cannot override `.env`.
