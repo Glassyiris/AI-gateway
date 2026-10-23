@@ -719,7 +719,6 @@ for service, config in services.items():
         raise SystemExit(f"dedicated CA private key mounted by service: {service}")
 PY
 python3 scripts/test-standard-cache-topology.py
-python3 scripts/test-standard-cache-operations.py
 
 # Build local components and parse their native configuration. These are syntax
 # gates, not snapshots of ports, service counts, or application policy values.

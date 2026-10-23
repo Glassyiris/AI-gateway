@@ -84,6 +84,9 @@ class StandardCacheTopology(unittest.TestCase):
             self.assertIn(value, bridge)
         for value in ("tmpfs:", "    ports:", "    networks:", "STORE_DIR", "CPA_API_KEY"):
             self.assertNotIn(value, bridge)
+        # Healthcheck reads PORT (default 8080 = keepalive in this netns); a wrong port deadlocks boot.
+        listen = re.search(r"LISTEN_ADDR: 127\.0\.0\.1:(\d+)", bridge).group(1)
+        self.assertRegex(bridge, r"\n      PORT: \"?" + listen + r"\"?\n")
         reference = re.search(r"image: \$\{RESPONSES_WS_SSE_BRIDGE_IMAGE:-([^}]+)\}", bridge).group(1)
         self.assertRegex(reference, r"^ghcr\.io/xz-dev/responses-ws-sse-bridge:[0-9a-f]{40}@sha256:[0-9a-f]{64}$")
         self.assertIn(f"RESPONSES_WS_SSE_BRIDGE_IMAGE={reference}\n", (ROOT / ".env.example").read_text())
@@ -156,10 +159,17 @@ class StandardCacheTopology(unittest.TestCase):
         preflight = (ROOT / "ansible/roles/ai_ops/tasks/preflight.yml").read_text()
         guard = preflight.split("- name: Detect Compose provider", 1)[0]
         self.assertIn("ansible.builtin.assert:", guard)
-        for tag in ("deploy-response-keeper", "deploy-responses-path", "restart-response-keeper"):
+        retired = ("deploy-response-keeper", "deploy-responses-path", "restart-response-keeper",
+                   "deploy-standard-cache-path", "restart-openai-api-cache-keeper", "rollback-standard-cache-path")
+        for tag in retired:
             self.assertIn(tag, guard)
         self.assertNotIn("ansible.builtin.shell:", guard)
         self.assertNotIn("ansible.builtin.file:", guard)
+        # Retired tags must not reach any task; only the preflight guard may name them.
+        for path in (ROOT / "ansible").rglob("*.yml"):
+            if path.name != "preflight.yml":
+                for tag in retired[3:]:
+                    self.assertNotIn(tag, path.read_text(), path)
 
     def test_operator_uses_shared_keepalive_not_public_apisix(self):
         owner = section(self.compose, "  operator-host-netns:\n")
