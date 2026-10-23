@@ -99,6 +99,9 @@ class Fixture:
         if service == 'responses-ws-sse-bridge':
             self.old = 'ghcr.io/xz-dev/' + service + ':' + 'a'*40 + '@sha256:' + 'b'*64
             self.new = self.old.replace('b'*64, 'd'*64)
+        if service == 'cloudflared':
+            self.old = self.old.replace('test/component', 'rollback-20261015/cloudflared')
+            self.new = self.new.replace('test/component', 'rollback-20261015/cloudflared')
         env = {'MODE': 'old'}
         if service == 'responses-ws-sse-bridge':
             env = {'PORT':'8086','LISTEN_ADDR':'127.0.0.1:8086','UPSTREAM_URL':'http://sub2api-ai-sse-relay:8080'}
@@ -211,14 +214,16 @@ def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--evidence', type=Path, required=True)
     parser.add_argument('--mutation', choices=['no-image-proof','early-baseline','no-progress','no-native-probe','no-group-cas','no-neighbour-check'])
-    parser.add_argument('--case', choices=['skip','digest','rollback','kill','native','generic','cas','neighbour','front'], action='append')
+    parser.add_argument('--case', choices=['skip','digest','rollback','kill','native','generic','cas','neighbour','front','preload'], action='append')
     args=parser.parse_args()
     args.evidence.mkdir(parents=True,exist_ok=True,mode=0o700)
     server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Probe)
     threading.Thread(target=server.serve_forever,daemon=True).start()
-    for case in args.case or ['skip','digest','rollback','kill','native','generic','cas','neighbour','front']:
-        f=Fixture(args.evidence,case,'aisix-status' if case=='native' else 'responses-ws-sse-bridge' if case=='front' else 'models-enricher',native=case!='native')
+    for case in args.case or ['skip','digest','rollback','kill','native','generic','cas','neighbour','front','preload']:
+        f=Fixture(args.evidence,case,'aisix-status' if case=='native' else 'responses-ws-sse-bridge' if case=='front' else 'cloudflared' if case=='preload' else 'models-enricher',native=case!='native')
         try:
+            if case=='preload':
+                state=f.state();state['images'][f.new]='sha256:'+'c'*64;f.save(state)
             if args.mutation:
                 f.mutate(args.mutation)
             if case=='native':
@@ -284,7 +289,7 @@ def main():
                 rollback=f.run('rollback-plan',op='rollback')
                 f.run('rollback',op='rollback',apply=True,digest=rollback)
                 assert f.baselines()==f.initial_baselines
-                assert len([m for m in f.state()['mutations'] if m[0]=='pull'])==1, 'rollback pulled an image'
+                assert len([m for m in f.state()['mutations'] if m[0]=='pull'])==(0 if case=='preload' else 1), 'preload or rollback pulled an image'
             print(case+': PASS',flush=True)
         finally:
             f.close()

@@ -24,6 +24,7 @@ def verify(image, data, allow_unpinned=False):
 
 
 def inspect(runtime, image, mode, allow_unpinned=False):
+    assert allow_unpinned or not image.startswith(('rollback-', 'localhost/')), 'preloaded image requires pull: false'
     local = run([runtime, 'image', 'inspect', image, '--format={{json .}}'])
     if local.returncode == 0:
         return verify(image, json.loads(local.stdout), allow_unpinned)

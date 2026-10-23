@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import tempfile
 import time
@@ -60,6 +61,26 @@ class ImageProof(unittest.TestCase):
         with self.assertRaises(AssertionError):
             IMAGE.verify('localhost/image:tag', {'Id': ID})
         self.assertEqual(IMAGE.verify('localhost/image:tag', {'Id': ID}, True)['source'], 'local')
+
+    def test_archive_pin_requires_preload_even_when_present(self):
+        for image in ('rollback-20261015/cloudflared:2026.10.0@' + PIN,
+                      'localhost/component:version@' + PIN):
+            with self.subTest(image=image), patch.object(IMAGE, 'run') as command:
+                command.return_value.returncode = 0
+                command.return_value.stdout = json.dumps({'Id': ID, 'RepoDigests': [image]})
+                with self.assertRaisesRegex(AssertionError, 'preloaded image requires pull: false'):
+                    IMAGE.inspect('docker', image, 'plan')
+                self.assertEqual(IMAGE.inspect('docker', image, 'plan', True)['image_id'], ID)
+                self.assertTrue(all(call.args[0][1:3] == ['image', 'inspect']
+                                    for call in command.call_args_list))
+
+    def test_preloaded_profiles_disable_pull(self):
+        defaults = (ROOT / 'ansible/roles/ai_ops/defaults/main.yml').read_text()
+        for service in ('cloudflared', 'cpa-model-sync', 'egress-proxy'):
+            with self.subTest(service=service):
+                profile = re.search(r'^  ' + re.escape(service) + r':.*\n(?:    .*\n)*', defaults, re.M)
+                self.assertIsNotNone(profile)
+                self.assertIn('\n    pull: false', profile.group())
 
 
 class OwnedLock(unittest.TestCase):

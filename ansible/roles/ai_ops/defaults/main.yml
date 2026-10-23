@@ -36,7 +36,10 @@ ai_ops_profiles:
   cli-proxy-api: {}
   sub2api: {}
   aisix: {}
-  cloudflared: {}
+  # Production uses an archive-preloaded rollback-* image whose config ID differs
+  # from the registry image; bind the local ID and never try to pull the alias.
+  cloudflared:
+    pull: false
   ai-sse-keepalive-proxy: {}
   openai-api-cache-keeper:
     front_cache: true
