@@ -83,6 +83,21 @@ Additional known limitations:
 - Keeper WS `logTurn` runs when the client frame is prepared, before upstream terminal storage. Its `stored=false`/short duration are not final storage outcomes. Client `store:true`, exact delta-only reconnect recall, and subsequent hit records establish retention; HTTP completion logs also show `stored=true`.
 - Unknown HTTP parents retain the non-standard 400; aborted ids are not required to be retained. Bare Opus's explicit tool-choice rejection and channel inventory/credit failures remain upstream issues. No exhaustive fuzz/standards certification, TTL-long soak or all-account traffic exercise is claimed.
 
+## VM reboot incident and recovery
+
+On the 2026-10-23 03:06:22 UTC VM boot, the new bridge exposed a cold-start health dependency bug: `LISTEN_ADDR=127.0.0.1:8086` was set, but its image healthcheck reads a separate `PORT` variable and defaults to 8080. While keepalive on 8080 was already running, the bridge check falsely passed against keepalive. At cold start keepalive waits for keeper, keeper for bridge health, and bridge incorrectly checks keepalive; `ai-gateway.service` fails with `dependency failed to start: container ai-gateway-responses-ws-sse-bridge-1 is unhealthy`. The gateway unit failed on three start attempts and then hit systemd's start limit (`Start request repeated too quickly`, 03:10:23 UTC). This was introduced by the front-chain deployment, not explained away as an upstream outage.
+
+Read-only checks at 03:16:42 UTC proved bridge `/healthz` on 8086 returned 200 while keeper on 8085 and keepalive on 8080 refused connections. Docker/containerd were enabled/active and netns target IDs existed; no Docker warning-level boot failure was found. Recovery timer ran successfully but skipped stopped keepalive/public APISIX, still allowlisted retired `response-keeper`, and classified bridge as unsupported. A successful timer run did not mean the public chain was available. Do not equate warm startup or a TCP probe on a shared port with a tested cold boot. Detailed local diagnosis: `/var/tmp/keeper-log-fix-20261023/reboot-diagnosis.md`; key cause and health evidence are preserved here independently of that path.
+
+### Supervisor recovery and acceptance
+
+The supervisor took sole production write ownership and completed recovery:
+
+1. **03:17 UTC:** started the six original stopped ingress containers: keeper, keepalive, `apisix-ai-sse-relay`, public APISIX, `cloudflared-apisix-relay`, and cloudflared. These were starts of existing containers, not a new image rollout. Bridge's incorrect port-8080 check then went green, corroborating the false-positive diagnosis.
+2. **03:19 UTC:** backed up/fresh-read the host configuration, added bridge `PORT=8086` alongside `LISTEN_ADDR=127.0.0.1:8086`, and recreated **only bridge** from its unchanged `6af0a3e` digest. The healthcheck now probes its own listener, not keepalive. Keeper remains `0b4e926`; Sub2API and other image/configuration values are unchanged. `systemctl reset-failed` plus starting `ai-gateway.service` returned **active(exited)/success**.
+3. **Post-recovery acceptance:** bare Opus SSE assistant-marker continuation **2 calls PASS**; strict WS slash Codex continuation on a **new socket**, **2 calls PASS**. Four inference calls total, zero retries. These are recovery smoke checks, not a repeat of the earlier 140-attempt matrix or a fresh VM reboot drill.
+4. Backups/rollback receipts remain private on the host: `/var/tmp/ai-gateway-reboot-recovery-20261023T031704Z` and `/var/tmp/ai-gateway-bridge-health-20261023T031916Z`. Supervisor owns synchronization of production compose/override/.env into the private-config checkout; no key-bearing snapshot is published here.
+
 ## Do not
 
 - Put Sub2API in front of the keeper or the bridge again.

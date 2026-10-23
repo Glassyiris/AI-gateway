@@ -698,6 +698,8 @@ services:
     environment:
       UPSTREAM_URL: http://sub2api-ai-sse-relay:8080
       LISTEN_ADDR: 127.0.0.1:8086
+      # Healthcheck uses PORT, not LISTEN_ADDR; 8080 belongs to keepalive.
+      PORT: "8086"
       SPOOL_DIR: /spool
       GOMEMLIMIT: 192MiB
     healthcheck:
