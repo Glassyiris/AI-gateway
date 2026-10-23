@@ -93,6 +93,16 @@ class StandardCacheTopology(unittest.TestCase):
         self.assertRegex(reference, r"^ghcr\.io/xz-dev/responses-ws-sse-bridge:[0-9a-f]{40}@sha256:[0-9a-f]{64}$")
         self.assertIn(f"RESPONSES_WS_SSE_BRIDGE_IMAGE={reference}\n", (ROOT / ".env.example").read_text())
 
+    def test_generic_component_prepares_image_before_no_pull_recreate(self):
+        ops = (ROOT / "ansible/ops.yml").read_text()
+        generic = ops.split("# ======================= deploy (component) =======================", 1)[1].split("# ======================= deploy-squid", 1)[0]
+        prepare, recreate = generic.split('- name: "Recreate only {{ service }}"', 1)
+        self.assertIn('{{ _compose }} pull {{ service }}', prepare)
+        self.assertIn("ai_ops_profiles[service].get('pull', true) | bool", prepare)
+        self.assertIn("not (ai_ops_profiles[service].get('pull', true) | bool)", prepare)
+        self.assertIn('{{ _runtime }} image inspect "$image"', prepare)
+        self.assertIn('{{ _compose }} up -d --no-deps --no-build --pull never {{ service }}', recreate)
+
     def test_published_images_match_gitlinks_and_environment(self):
         env = (ROOT / ".env.example").read_text()
         modules = (ROOT / ".gitmodules").read_text()
