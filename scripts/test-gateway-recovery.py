@@ -187,6 +187,61 @@ class RecoveryTests(unittest.TestCase):
         self.assertIn("openai-api-cache-keeper", recovery.CHECKS)
         self.assertNotIn("response-keeper", recovery.CHECKS)
 
+    def test_failed_stack_startup_is_observation_only(self):
+        for state in ("active", "failed"):
+            with self.subTest(state=state), mock.patch.object(recovery.subprocess, "run", return_value=
+                    subprocess.CompletedProcess([], 0, state + "\n", "")) as run:
+                result = recovery.startup_unit_health()
+                self.assertEqual(result["state"], state)
+                self.assertEqual(result["ok"], state != "failed")
+                self.assertEqual(result["action"], "observe_only")
+                self.assertEqual(run.call_args.args[0], ["systemctl", "show", "ai-gateway.service",
+                                                        "--property=ActiveState", "--value"])
+                self.assertEqual(run.call_count, 1)
+        with mock.patch.object(recovery.subprocess, "run", side_effect=FileNotFoundError):
+            self.assertIsNone(recovery.startup_unit_health()["ok"])
+        with mock.patch.object(recovery.subprocess, "run", side_effect=subprocess.TimeoutExpired([], 2)):
+            self.assertIsNone(recovery.startup_unit_health()["ok"])
+
+    def test_bridge_recovery_probes_8086_and_never_starts_an_exited_bridge(self):
+        started = "1970-01-01T00:00:01+00:00"
+        containers = [{"Id": service, "Name": f"/ai-gateway-{service}-1", "Config": {
+            "Labels": {"com.docker.compose.project": "ai-gateway", "com.docker.compose.service": service},
+            "Env": []}, "State": {"Running": True, "Pid": 123, "StartedAt": started}}
+            for service in recovery.CHECKS]
+        bridge = next(row for row in containers if row["Id"] == "responses-ws-sse-bridge")
+        probes, restarts = [], []
+
+        def probe(pid, request):
+            probes.append(request)
+            return {"ok": request["port"] != 8086}
+
+        def api(method, path, timeout=10):
+            if method == "POST":
+                restarts.append(path)
+            return []
+
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as directory, \
+                mock.patch.object(recovery, "STATE_DIR", Path(directory)), \
+                mock.patch.object(recovery, "inspect", side_effect=lambda names: containers if len(names) > 1 else [bridge]), \
+                mock.patch.object(recovery, "namespace_probe", side_effect=probe), \
+                mock.patch.object(recovery, "docker_api", side_effect=api), \
+                mock.patch.object(recovery, "startup_unit_health", return_value={"state": "failed", "action": "observe_only"}), \
+                mock.patch.object(recovery.time, "time", return_value=1000), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            for _ in range(3):
+                recovery.run(True)
+            self.assertEqual(restarts, ["/containers/responses-ws-sse-bridge/restart?t=10"])
+            request = next(row for row in probes if row["port"] == 8086)
+            self.assertEqual((request["path"], request["expected"]), ("/healthz", 200))
+            bridge["State"]["Running"] = False
+            recovery.run(True)
+            report = json.loads(output.getvalue().splitlines()[-1])
+        self.assertEqual(len(restarts), 1)
+        row = next(row for row in report["checks"] if row["service"] == "responses-ws-sse-bridge")
+        self.assertEqual(row["action"], "skip_not_running")
+        self.assertEqual(report["startup_unit"]["state"], "failed")
+
     def test_pprof_capture_streams_bounded_files_and_keeps_recent(self):
         Handler.body = b"heap profile\n"
         with tempfile.TemporaryDirectory(dir="/var/tmp") as directory, \

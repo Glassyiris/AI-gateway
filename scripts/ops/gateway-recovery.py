@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import signal
 import socket
+import subprocess
 import sys
 import time
 from urllib.parse import quote
@@ -21,6 +22,7 @@ CHECKS = {
     "cli-proxy-api": (8317, "/v1/models", 200),
     "sub2api": (8080, "/health", 200),
     "openai-api-cache-keeper": (8085, "/healthz", 200),
+    "responses-ws-sse-bridge": (8086, "/healthz", 200),
     "models-enricher": (8090, "/healthz", 200),
     "ai-sse-keepalive-proxy": (8080, "/healthz", 200),
     "apisix": (9080, "/v1/models", 404),
@@ -261,6 +263,20 @@ def save(state, filename):
     temporary.replace(filename)
 
 
+def startup_unit_health():
+    """Observe a failed stack startup; never start/reset the unit or stopped containers."""
+    try:
+        result = subprocess.run(
+            ["systemctl", "show", "ai-gateway.service", "--property=ActiveState", "--value"],
+            capture_output=True, text=True, timeout=2, check=False)
+        state = result.stdout.strip() if result.returncode == 0 else "unknown"
+    except (OSError, subprocess.TimeoutExpired):
+        state = "unknown"
+    return {"unit": "ai-gateway.service", "state": state,
+            "ok": False if state == "failed" else None if state == "unknown" else True,
+            "action": "observe_only"}
+
+
 def run(apply):
     names = [f"{PROJECT}-{service}-1" for service in CHECKS]
     containers = inspect(names)
@@ -332,7 +348,8 @@ def run(apply):
         save(state, filename)
     observations = coverage(containers, report)
     print(json.dumps({"apply": apply, "utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                      "checks": report, "coverage": observations}), flush=True)
+                      "checks": report, "coverage": observations,
+                      "startup_unit": startup_unit_health()}), flush=True)
 
 
 def main():
