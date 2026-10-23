@@ -12,9 +12,32 @@ One production writer, no VM reboot. Order: bridge → models-enricher → recov
 - Production/private-config SHA256: compose `b627271ab5fa8cb52588d2ffc3b8e109caec21afdf8e451656d9b06980f370bd`; override `b3f46dcb7c8284845ecf247b1f225c4e7dff08684aa4b09d9e68822249ae6521`; `.env` `0934ac93dee1028d0198fefdda6fd546f5d7e8ab67bf7cb020cc4f657827607b`. This three-file equality does not claim that every managed file was checked.
 - Local topology regression 11/11 and `git diff --check` pass. First smoke harness launch lacked Python `websockets` and made **zero** calls; rerun used the existing cached dependency via `uv run --offline --with websockets`, not a production retry. Private evidence: `/var/tmp/deploy-batch-20261023/bridge-*`.
 
+## Models-enricher — deployed
+
+- Published on main `68a37627e1649b50c966c0c886a17679bd308f77` by [39905857374](https://github.com/xz-dev/AI-gateway/actions/runs/39905857374). Its `models-enricher` tree equals the approved `af3376d` tree (`79b3c30e75d4285be051970a06269cbdd89bd60b`); workflow blob also matches (`0ba4e3c495e4d24a3616009fd71150cea4f22c3b`). Build context is only `./models-enricher`; no other source tree is copied. No extra release refs were created.
+- Pin: `ghcr.io/xz-dev/ai-gateway-models-enricher:scheduled-refresh-af3376dc95c5@sha256:432e88475f0131475caac054a9d8731bf1aedc119f40ab1389739c8294949310`. GHCR index, linux/amd64 manifest/config SHA256 and source revision were independently read back. This workflow publishes amd64, not a newly claimed dual-architecture image.
+- Existing generic Ansible path used; only this container changed. Readback **06:00:38 UTC**: all 54 neighbours unchanged; health and actual `/readyz`-based CLI probe pass; running OCI revision is `68a3762`. Existing production YAML preserved with SHA256 `8a71b24832525e4964e3266b58954e3193dfb4b6a9b6bf0d745c59ed85e4ad2e`; defaults 30m schedule / 10m entry window apply without overwriting private settings. Three-file equality verified: compose/override unchanged from bridge; `.env` now `dbba913363c27346fb44d3befb612a44566fc770842f7548dcf5639dbd3021d6`.
+- Single local `:9083/models-table` GET at **05:59:42 UTC**: HTTP200, 334.894ms, last success `05:58:54Z`, next schedule `06:28:44Z`. This is a warm-page production measurement, not a cold-page or scheduled-tick acceptance. Cold/nonblocking/manual/single-flight behaviour has source-level integration evidence in the Lane B receipt; no extra refresh POST was sent here.
+- Three public `/v1/models` GETs, zero retries: **4.525s / 0.390s / 0.702s**, all HTTP200 / 361 models. A short checkpoint, not p95 or proof every Pi discovery meets its deadline.
+- Four real inference calls, zero retries: same bare GPT SSE and slash Codex WS new-socket marker/parent-delta pairs, all `completed` with exact recall. Keeper HTTP 06:00:46/48 and WS 06:00:51/56 are `stored=true`, paired `previous=false/true`; Sub2API request IDs `8ea020f1-db3f-4171-b4e5-823ec1b87f8e`, `5ad26c10-4faf-4ecf-a0a3-3ecb2c7dae93`, `be93057b-0fcd-40d3-ac86-cb9a8526c9b5`, `ba15f5b7-2eb4-4564-8a0c-915b82675953`.
+
+### Two stopped apply attempts, restored before activation
+
+First apply uploaded the candidate `.env` but failed before pull: a space-bearing `-e key=value` command override was parsed as `env` alone. CAS proved all 55 containers unchanged. Only `.env` was restored; its prematurely updated generic baseline was backed up and restored under separate supervisor approval. The second apply used the correct default `docker compose`, but existing `pull_policy: never` made `compose pull` return success without fetching; `up --pull never` correctly refused the missing image. Again all 55 containers were unchanged, and `.env` plus its baseline were CAS-restored before continuing. Neither attempt sent inference smoke or recreated a service.
+
+Supervisor-approved minimal fixes: `9e9a8b0` forbids implicit pulls during generic activation (CI [39906312680](https://github.com/xz-dev/AI-gateway/actions/runs/39906312680) success); `c50ac22` forces the explicit pull branch to `pull --policy always` (CI [39908152120](https://github.com/xz-dev/AI-gateway/actions/runs/39908152120) success). The preloaded/`pull:false` branch still requires an existing local image and never pulls. Production Compose v2.40.3 supports `--policy`. Regression was red before each fix; topology 12/12 and full `scripts/validate.sh .env.example` pass with an explicit empty test override, leaving ignored operator override untouched. Initial local validate hit that unrelated private override's missing variable; it was not a source failure.
+
+Third apply, explicitly capped as the last allowed attempt, succeeded after a fresh Ansible `config --quiet` argv proof, plan and external hash/container CAS. The legacy profile has no approval digest; no front-profile digest is invented for it. Group backup and receipts: `/var/tmp/deploy-batch-20261023-enricher-before` (0700/0600); local evidence `/var/tmp/deploy-batch-20261023/enricher-*`.
+
+### Generic profile follow-ups (not fixed here)
+
+- Plan does not exercise/validate the actual pull/activation command; a valid plan alone did not catch a malformed command override.
+- File baselines advance before pull/recreate succeed; failed apply can leave a baseline describing undeployed configuration.
+- Group-transaction CAS, automatic readiness/digest/image-present checks and all-neighbour verification are still absent from this legacy profile. This batch supplied external CAS, grouped private backups, image/revision/readiness and neighbour readback; they are not newly guaranteed by generic Ansible.
+
 ## Remaining steps
 
-Models-enricher image publication/deployment, updated recovery guard, and keeper `24h / 10000 / 0` observation are still pending at this checkpoint. Their source CI success is not production acceptance.
+Updated recovery guard and keeper `24h / 10000 / 0` observation are still pending at this checkpoint. Their source CI success is not production acceptance.
 
 ## Limits
 
