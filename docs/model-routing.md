@@ -2,6 +2,8 @@
 
 Read this before you change `apisix-models/`, Sub2API account settings, or the keeper chain.
 
+> Planned change (decided 2026-10-23, not deployed): WebSocket will end at the keeper and the ws→sse bridge in front of Sub2API, and Sub2API will see only HTTP. For the reasons, read [websocket-termination.md](websocket-termination.md). Until then, the `http_bridge` contract below applies.
+
 ## The rule
 
 The inner models gateway (`apisix-models`) picks the backend from the literal `model` string:
