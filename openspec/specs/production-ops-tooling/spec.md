@@ -160,3 +160,14 @@ The Ansible README, role defaults, usage comments, and operator variable example
 #### Scenario: Operator looks for models-enricher controls
 - **WHEN** an operator reads the documented operation and variable surfaces
 - **THEN** they can identify how to adopt, validate, plan, deploy, verify, and roll back the configuration without logging into the server to edit it
+
+### Requirement: Front keeper and bridge use existing component profiles
+The Ansible tooling SHALL expose `openai-api-cache-keeper` and `responses-ws-sse-bridge` through the existing profile-selected `deploy` and `rollback` operations. It SHALL NOT reinstate the retired inner-keeper or scoped standard-cache operations. Operator defaults, variable examples and the README SHALL document the private source directory, Docker Compose v2 rendering, fresh approval digest, target-only interruption, verification and explicit rollback.
+
+#### Scenario: Operator plans a front component update
+- **WHEN** the operator selects either front component with `ai_ops_mode=plan`
+- **THEN** the existing playbook reports a sanitized candidate/live hash and identity plan without uploading, pulling, recreating, building, or acquiring a production writer lock
+
+#### Scenario: Retired scoped operation is requested
+- **WHEN** an operator invokes a retired inner-keeper or standard-cache tag
+- **THEN** preflight rejects it before runtime detection or managed writes even though the new generic profiles exist

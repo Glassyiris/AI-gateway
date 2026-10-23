@@ -15,6 +15,7 @@ Health has three separate meanings:
 | cli-proxy-api | Authenticated `GET /v1/models`, HTTP 200 and a JSON `data` array | CPA can serve its local catalog read path |
 | sub2api | `GET /health`, HTTP 200 | Application health endpoint; dependency semantics belong to Sub2API |
 | openai-api-cache-keeper | `GET /healthz`, HTTP 200 | Keeper HTTP liveness, not proof of cache writes, hits or replay |
+| responses-ws-sse-bridge | `GET :8086/healthz`, HTTP 200 | Bridge local liveness; added in source, active after the updated guard is deployed |
 | models-enricher | `GET /healthz`, HTTP 200 | Enricher local liveness |
 | ai-sse-keepalive-proxy | `GET /healthz`, HTTP 200 | Keepalive proxy local liveness |
 | apisix | Local `GET /v1/models`, expected HTTP 404 | APISIX's local rejection route responds; no upstream request |
@@ -33,6 +34,8 @@ Recovery policy:
 - Probe socket timeout is three seconds; a six-second wall-clock alarm bounds each namespace probe, including slow response bodies. The original namespace is restored in `finally`.
 - A nonblocking lock prevents overlap. The systemd service has a 120-second ceiling, 64 MiB memory limit, and 10% CPU quota. The timer waits 30 seconds after each completed invocation, with bounded jitter.
 
+Each cycle also reports `startup_unit` from a bounded, read-only `systemctl show ai-gateway.service`. A failed startup is visible as `state=failed, ok=false, action=observe_only`. It never resets the unit's start limit, starts the stack, or starts an exited container. Unknown systemd state is reported as unknown, not success.
+
 This does not prove that every upstream preparation/write stall also blocks the catalog. It does not identify CPA's memory-growth root cause. A successful systemd invocation means the guard ran; inspect individual `checks[].ok` and `action`, not only the unit result.
 
 ## Deploy and inspect
@@ -46,7 +49,7 @@ ansible-playbook ops.yml --tags deploy-recovery -e ai_ops_mode=plan
 ansible-playbook ops.yml --tags deploy-recovery -e ai_ops_mode=apply
 ```
 
-The operation copies the recovery script, its read-only `gateway_health.py` role probes, and units; checks application probes without restarting, verifies units, and enables the timer. It does not deploy application routes or recreate containers. Inspect the route and healthcheck change separately before deploying them.
+Plan compares the four candidate script/unit checksums with live files and reports which need upload; it does not copy files or start the timer. Apply copies the recovery script, its read-only `gateway_health.py` role probes, and units; checks application probes without restarting, verifies units, and enables the timer. It does not deploy application routes or recreate containers. Inspect the route and healthcheck change separately before deploying them.
 
 ```bash
 systemctl status ai-gateway-recovery.timer --no-pager
@@ -80,16 +83,18 @@ A restart request already accepted by Docker can still finish after the guard st
 
 ## Keeper and bridge maintenance
 
-No Ansible operation deploys, restarts or rolls back keeper or the ws-sse
-bridge; the scoped standard-cache tags are retired and fail in preflight. Use a
-separately authorized manual rollout as described in
-[Keeper and ws-sse bridge rollout](../ansible/README.md#keeper-and-ws-sse-bridge-rollout-no-ansible-operation).
-Coordinate a maintenance window with other owners and this recovery timer; a
-keeper restart discards its disposable task/checkpoint state.
+Keeper and bridge have guarded single-service Ansible `deploy`/`rollback`
+profiles; the old scoped standard-cache tags remain retired and fail in preflight.
+See [Keeper and ws-sse bridge rollout](../ansible/README.md#keeper-and-ws-sse-bridge-rollout).
+Coordinate one production writer and a maintenance window with other owners and
+this recovery timer. A keeper restart interrupts in-flight streams and collectors;
+completed cached history remains on its named volume.
 
-The recovery timer restarts only running containers that fail probes. It skips
-stopped or exited containers, does not probe `responses-ws-sse-bridge` and
-cannot break Compose boot health gates. Boot start depends on
+The updated recovery source includes bridge `:8086/healthz` among its eight
+application checks. This addition is not deployed merely by committing the source;
+use the separate reviewed `deploy-recovery` operation. The timer restarts only
+running containers that fail probes. It still skips stopped or exited containers
+and cannot break Compose boot health gates. Boot start depends on
 `ai-gateway.service` and Compose `depends_on`. On 2026-10-23 a VM reboot
 deadlocked there: the bridge healthcheck probed its default `PORT` 8080
 (keepalive in the shared namespace) instead of `LISTEN_ADDR` 8086. Keeper
@@ -109,7 +114,7 @@ On 2026-10-20 the initial subprocess-heavy guard reached its 64 MiB limit. Repla
 
 ## Full-stack host observations
 
-The deployed host guard now observes every running container, including the standalone relay. The automatic restart allowlist remains exactly the seven applications above. Additional roles only produce observations; they cannot enter the restart decision path.
+The deployed host guard observes every running container, including the standalone relay. Its historical automatic allowlist has seven applications; the updated source adds only the bridge as the eighth, effective after guard deployment. Additional roles only produce observations; they cannot enter the restart decision path.
 
 | Role | Deployed observation | Meaning / limit |
 | --- | --- | --- |
@@ -128,7 +133,7 @@ The deployed host guard now observes every running container, including the stan
 
 HTTP addresses above match the current static topology. Update them deliberately when that topology changes. Missing evidence, unsupported roles, inaccessible process files, and stale native health results are unknown, never fixed-success fallbacks. New containers with unknown roles do not silently become green.
 
-The emitted JSON keeps `checks` for seven application recovery decisions and adds `coverage.running`, `coverage.observed`, and per-container `coverage.checks`. Compare running/observed counts and inspect **both** `ok` and any `ready` field. A successful unit result is not an all-dependencies-green signal.
+The updated source emits `checks` for eight application recovery decisions, read-only `startup_unit`, `coverage.running`, `coverage.observed`, and per-container `coverage.checks`. Compare running/observed counts and inspect **both** `ok` and any `ready` field. A successful unit result is not an all-dependencies-green signal.
 
 Production verification on 2026-10-20 at 14:56 UTC recorded 54 running / 54 observed, all 54 role/liveness checks passing, no unknown observations, unchanged running container IDs, and zero guard restart attempts. The model-sync worker still reported four failed dependencies (`ok=true, ready=false`); this is an open readiness issue, not suppressed as green. Counts are point-in-time, not a deployment contract.
 

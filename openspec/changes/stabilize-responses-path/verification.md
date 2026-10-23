@@ -1,5 +1,9 @@
 # Verification
 
+> **SUPERSEDED — 2026-10-23.** Preserve these dated receipts as historical
+> evidence, not a current deployment or acceptance claim. See
+> [SUPERSEDED.md](SUPERSEDED.md) for the replacement topology and open work.
+
 ## A — Lua last-known-good fallback (deployed early, operator-approved 2026-10-19)
 
 - Pre-deploy prod files matched HEAD (config.yaml 1dcc817f…, routing_selector.lua 60b9e7ab…). Rollback copy + inspect + container list + compose hashes: `/root/AI-gateway/.rollback/apisix-models-lkg-20261019T111041Z/`.

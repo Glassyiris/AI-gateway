@@ -1,3 +1,7 @@
+> **SUPERSEDED — 2026-10-23.** Historical design only. “Current” and “today”
+> below refer to the original investigation, not the deployed front keeper/bridge.
+> See [SUPERSEDED.md](SUPERSEDED.md); do not restore `/rk` or keeper routing.
+
 ## Context
 
 See proposal.md (Why) for the production evidence. Current topology, from `apisix-models/apisix.yaml` and `compose.yaml`:

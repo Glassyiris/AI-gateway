@@ -1,3 +1,9 @@
+> **SUPERSEDED — 2026-10-23.** Closed as an implementation plan, not completed acceptance.
+> See [SUPERSEDED.md](SUPERSEDED.md). The historical inner `/rk` keeper,
+> keeper-side routing and last-known-good deltas MUST NOT be synced or deployed.
+> Current authority: [front WS decision](../../../docs/websocket-termination.md)
+> and the main routing/cache specs. Historical evidence below is preserved.
+
 ## Why
 
 Since response-keeper went live, Responses traffic has kept failing with `Connection error`, `503 Model routing is temporarily unavailable` and frequent `WS/full` turns. Production evidence (2026-10-19, read-only):

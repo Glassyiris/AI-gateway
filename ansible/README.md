@@ -84,7 +84,10 @@ defaults. Key ones:
 | `ai_ops_compose_project` | `ai-gateway` | compose project name |
 | `ai_ops_compose_cmd` | auto-detect | compose provider (`docker compose` / `podman compose` / `podman-compose`) |
 | `ai_ops_mode` | `apply` | `plan` = read-only diff |
-| `ai_ops_min_mem_mb` / `ai_ops_min_disk_mb` | `256` / `1024` | capacity gate thresholds |
+| `ai_ops_local_compose_cmd` | `docker compose` | Docker Compose v2 controller command for offline front-component rendering; not podman-compose |
+| `ai_ops_front_approved_digest` | `""` | exact reviewed keeper/bridge plan digest; required for apply and rollback |
+| `ai_ops_front_verify_retries` / `ai_ops_front_verify_delay_seconds` | `30` / `2` | bounded front-component health wait |
+| `ai_ops_min_mem_mb` / `ai_ops_min_disk_mb` | `200` / `1024` | capacity gate thresholds |
 | `ai_ops_squid_image` | `ai-gateway-squid:6.13-2-deb13u3-r1` | pinned image for offline parse validation |
 | `ai_ops_model_sync_approved_digest` | `""` | exact digest printed by the reviewed model-sync plan; required when the policy changes |
 | `ai_ops_model_sync_verify_retries` / `ai_ops_model_sync_verify_delay_seconds` | `30` / `2` | bounded wait for the recreated sidecar's immediate round |
@@ -94,7 +97,7 @@ defaults. Key ones:
 
 ## Drift gate
 
-Component deploys (`--tags deploy`, `deploy-aisix`, `deploy-model-sync`) checksum each managed remote
+Legacy component profiles (`--tags deploy`, `deploy-aisix`, `deploy-model-sync`) checksum each managed remote
 file against the recorded baseline (`.ai-ops-state/<file>.baseline`); a mismatch
 stops the deploy before any upload. Squid policy deploys (`--tags deploy-squid`)
 upload one tarball + a `sha256sum` manifest over all generated files; the drift
@@ -105,25 +108,81 @@ edited by hand: review the shown diff/failing files, adopt the change into the
 local config, and re-run. Rollback likewise refuses to overwrite a remote file
 that changed independently after the deploy.
 
-## Keeper and ws-sse bridge rollout (no Ansible operation)
+## Keeper and ws-sse bridge rollout
 
+`openai-api-cache-keeper` and `responses-ws-sse-bridge` now have guarded
+`ai_ops_profiles` entries using the existing `deploy` and `rollback` operations.
 The scoped `deploy-standard-cache-path`, `restart-openai-api-cache-keeper` and
-`rollback-standard-cache-path` tags are retired, like the older
+`rollback-standard-cache-path` tags remain retired, like the older
 `deploy-response-keeper`, `deploy-responses-path` and `restart-response-keeper`.
-Preflight rejects all six before runtime detection or managed writes. The scoped
-tool predated the keeper -> `responses-ws-sse-bridge` chain, never passed
-independent safety review and refused the current topology.
+Preflight rejects all six before runtime detection or managed writes.
 
-`openai-api-cache-keeper` and `responses-ws-sse-bridge` are not
-`ai_ops_profiles` entries, so `--tags deploy -e service=...` refuses them. Roll
-them out only as a separately authorized manual deployment that follows the
-[WebSocket termination decision](../docs/websocket-termination.md) and the
-[routing checklist](../docs/model-routing.md#checklist-before-pushing-or-deploying):
-commit+digest pinned images pulled explicitly, `--no-build --pull never`,
-keeper `UPSTREAM_URL=http://127.0.0.1:8086` and `IGNORE_CLIENT_STORE_FALSE=true`,
-a private snapshot of live Compose/override/environment/APISIX files first, and
-Sub2API account WebSocket modes changed in the same rollout. Adding a reviewed
-Ansible path for these two services is open follow-up work.
+Use Docker Compose v2 on both host and controller. Rendering needs no local
+Docker daemon. `podman-compose` does not provide the required
+`--no-path-resolution --format json` contract. A task-local standalone Compose
+binary can be selected with `ai_ops_local_compose_cmd`; do not install global
+packages for a one-off plan.
+
+```bash
+# From ansible/, with private-config adopted from production, not the public example.
+ansible-playbook ops.yml --tags deploy -e service=openai-api-cache-keeper -e ai_ops_mode=plan
+ansible-playbook ops.yml --tags deploy -e service=responses-ws-sse-bridge -e ai_ops_mode=plan
+
+# After explicit approval of the selected plan and interruption window:
+ansible-playbook ops.yml --tags deploy -e service=openai-api-cache-keeper \
+  -e ai_ops_mode=apply -e ai_ops_front_approved_digest='<reviewed-plan-digest>'
+
+# Explicit rollback also needs a fresh plan and its own approval digest.
+ansible-playbook ops.yml --tags rollback -e service=openai-api-cache-keeper -e ai_ops_mode=plan
+ansible-playbook ops.yml --tags rollback -e service=openai-api-cache-keeper \
+  -e ai_ops_mode=apply -e ai_ops_front_approved_digest='<reviewed-rollback-digest>'
+```
+
+Plan reads configuration hashes, effective Compose and live container identities;
+it never uploads, pulls or recreates. Secret-bearing Compose/environment output
+is suppressed. `config_diff: false` means the three source files equal live bytes,
+not that an apply is needed. Plan shows only approved topology environment,
+immutable image, health, namespace owner, protected-container count and digest.
+The digest binds the source location, all three candidate/live SHA256 hashes,
+selected container identity/state and every protected project-container identity/state.
+A stale digest refuses apply before any mutation. Cooperating front-component
+applies share one exclusive lock; planning never acquires it. An interrupted
+controller can leave that lock behind: confirm the writer is gone and coordinate
+recovery before removing it, never bypass a live owner's lock.
+
+Only the selected service's **image/environment** may change. All other effective
+Compose settings, mounts, resource limits, dependencies, networks and services
+must remain identical. Images require a 40-character source revision and SHA256
+digest. Keeper stays `UPSTREAM_URL=http://127.0.0.1:8086` with
+`IGNORE_CLIENT_STORE_FALSE=true`; bridge stays loopback `:8086` with `PORT=8086`.
+Neither profile can add provider credentials or routing. Compose runs with a
+clean process environment so ambient shell exports cannot override `.env`.
+
+Apply explicitly pulls that pinned image, checks fresh hashes/identities again,
+and creates a private grouped snapshot (`0700` directory, `0600` files) under
+`.ai-ops-state/front-<service>-*`. It checks source/snapshot/live hashes again,
+uploads the reviewed three files, checks effective configuration, then runs only
+`up -d --force-recreate --no-deps --no-build --pull never <service>`. Readback
+requires the exact image ID/reference, selected environment, healthy status,
+correct shared namespace owner/inode, and every adjacent container identity
+unchanged. The private snapshot contains a sanitized success receipt; the guarded
+rollback reference is `.ai-ops-state/front-<service>-last.json`.
+
+A failed activation stops with a private `front-<service>-failure.json` receipt;
+it does **not** blindly restore over an unknown live state. The explicit rollback plan accepts only old/candidate file hashes and
+image IDs from the recorded transaction, unchanged protected containers, and
+intact snapshot hashes. Rollback never pulls or builds and must read back the
+original image ID. Another intervening operation requires manual reconciliation.
+After any emergency edit or rollback, adopt the resulting files back into local
+`private-config` immediately. The host Git checkout is never a deployment source.
+
+Coordinate one production writer and a maintenance window. **Recreating keeper
+or bridge interrupts in-flight streams**; completed keeper history remains on its
+named volume. This path does not change Sub2API accounts, restart dependencies,
+repair a failed whole-stack boot, or prove provider continuation. Follow the
+[WS decision](../docs/websocket-termination.md) and
+[routing checklist](../docs/model-routing.md#checklist-before-pushing-or-deploying);
+real SSE/WS terminal and reconnect acceptance is a separate authorized check.
 
 ## Model-sync policy safety
 

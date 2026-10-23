@@ -265,3 +265,29 @@ Deploy and rollback receipts SHALL record candidate and observed configuration d
 #### Scenario: Recovery is incomplete
 - **WHEN** the previous configuration cannot be restored and verified
 - **THEN** the receipt reports recovery-required rather than successful deployment
+
+### Requirement: Front-component deployment is a scoped approved transaction
+Keeper and WS/SSE bridge component operations SHALL allow only the selected service's image and environment to change. The full effective Compose outside that scope SHALL remain unchanged. Apply SHALL bind approval to the host, deployment root/project, candidate/live file hashes and container identities/states, serialize cooperating front-component writers, explicitly pull an immutable source-revision/digest image before activation, and recheck live preconditions before configuration writes and recreation. It SHALL take grouped mode-0700/0600 private snapshots, preserve the pure-cache/shared-namespace topology, and recreate only the selected service with no dependencies, build or implicit pull. Verification SHALL read back the exact image, topology environment, health, namespace owner and protected containers. Failure SHALL stop with a protected receipt rather than claim automatic recovery.
+
+#### Scenario: Candidate contains an unrelated service change
+- **WHEN** a keeper or bridge plan changes another service, volume, dependency, resource limit or network
+- **THEN** planning fails without modifying serving configuration or starting containers
+
+#### Scenario: Live state changes after plan approval
+- **WHEN** candidate files, live files, selected container or protected container identities/states differ from the approved plan
+- **THEN** apply refuses configuration upload or activation and requires a newly reviewed plan
+
+#### Scenario: Candidate exits and explicit rollback is requested
+- **WHEN** the operator reviews a fresh rollback plan whose protected snapshot and old/candidate identities still match
+- **THEN** rollback may restore the previous selected-service configuration without pulling or building, verifies its original image and health, and leaves unrelated containers unchanged
+
+### Requirement: Bounded recovery observes bridge and stack startup separately
+The recovery guard SHALL include the running WS/SSE bridge's local `:8086/healthz` HTTP-200 check in its bounded application allowlist. Existing grace, consecutive-failure, cooldown/hourly budget, ownership and one-restart-per-cycle rules SHALL apply. It SHALL continue skipping exited, stopped, paused or restarting containers. A bounded read-only observation of failed `ai-gateway.service` startup SHALL NOT authorize starting the stack, resetting its start limit or restarting dependencies.
+
+#### Scenario: Running bridge fails its local probe
+- **WHEN** bridge failures meet the existing bounded restart policy
+- **THEN** only that owned bridge instance may be restarted after fresh identity checks
+
+#### Scenario: Failed startup leaves bridge exited
+- **WHEN** `ai-gateway.service` is failed and bridge is not running
+- **THEN** the guard reports failed startup and skips the bridge rather than breaking the Compose boot gate by starting services

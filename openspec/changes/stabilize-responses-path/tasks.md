@@ -1,3 +1,8 @@
+> **SUPERSEDED — 2026-10-23.** This is a historical task ledger, not an active
+> deployment queue. Unchecked items stay unchecked; surviving acceptance work
+> is tracked separately. Do not execute or sync old topology tasks.
+> See [SUPERSEDED.md](SUPERSEDED.md).
+
 ## 0. Preconditions
 
 - [x] 0.1 Confirm the keeper streaming-memory core (PLAN/keeper-oom.md) is accepted and deployed, and record its keeper commit and image digest as this change's base. Verify that `docker inspect` of production keeper shows that digest and that the named cache volume is mounted.
