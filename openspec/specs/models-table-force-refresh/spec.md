@@ -7,11 +7,18 @@ Provide operators with a bounded, explicitly triggered way to refresh the diagno
 ## Requirements
 
 ### Requirement: Models table exposes an explicit force-refresh action
-The diagnostic models-table surface SHALL keep `GET /models-table` read-only and SHALL expose `POST /models-table/refresh` as the force-refresh action. The server-rendered table SHALL include a form control that submits this action without requiring JavaScript.
+The diagnostic models-table surface SHALL expose `POST /models-table/refresh` as the explicit force-refresh action. The server-rendered table SHALL include a form control that submits this action without requiring JavaScript. `GET /models-table` SHALL render the most recently published table without waiting for upstream collection. When no usable table has been published, it SHALL immediately render a loading/no-data page with the same refresh form.
 
-#### Scenario: Normal table view stays read-only
+#### Scenario: Entry inside the successful-refresh window
+- **GIVEN** a successful refresh completed within the configured entry window
 - **WHEN** an operator requests `GET /models-table`
-- **THEN** the system renders the current models table without initiating a forced upstream refresh
+- **THEN** the system renders the current table without initiating another forced refresh
+
+#### Scenario: Entry outside the successful-refresh window
+- **GIVEN** the last successful refresh is older than the entry window or no successful refresh exists
+- **WHEN** an operator requests `GET /models-table`
+- **THEN** the system starts or joins the shared refresh job in the background
+- **AND** immediately renders existing data or a loading/no-data page without waiting for that job
 
 #### Scenario: Operator submits refresh
 - **WHEN** an operator submits the server-rendered refresh form
@@ -40,26 +47,54 @@ A force-refresh request SHALL bypass eligible enricher read caches for the CPA a
 - **THEN** the system does not invoke, restart, or add a control request to `cpa-model-sync`
 
 ### Requirement: Refresh result reports freshness
-The rendered response to a force-refresh request SHALL state whether fresh collection succeeded and SHALL display the completion time. The page SHALL remain server-rendered and SHALL NOT require browser-side JavaScript or a secondary catalog request.
+The rendered response to a force-refresh request SHALL state whether fresh collection succeeded and SHALL display the completion time. Table pages SHALL show the last successful refresh completion and the next scheduled refresh, or explicitly state that no success/schedule exists. Failed attempts and attempts using retained metadata inputs SHALL NOT advance the successful-refresh window. The page SHALL remain server-rendered and SHALL NOT require browser-side JavaScript or a secondary catalog request.
 
 #### Scenario: Successful refresh status
 - **WHEN** the full forced collection and table build succeed
 - **THEN** the rendered page identifies the result as freshly collected
 - **AND** displays the refresh completion time
 
-### Requirement: Failed refresh preserves the last usable table
-If any required force-refresh phase fails, the system SHALL render the last usable models table with a prominent failure warning and the failed attempt time. It SHALL NOT label the retained table as freshly collected. If no last usable table exists, the system SHALL return an error page with a non-success HTTP status.
+### Requirement: Failed refresh does not fabricate current authority
+A metadata failure SHALL reuse eligible last-successful input responses and recompose the table from the current authoritative CPA snapshot, with a stale-input warning. A manual refresh without usable CPA authority SHALL return a non-success error page instead of replaying a saved table as a fresh result. A failed background refresh SHALL leave the last published diagnostic table available to later GET requests with a failure warning; this retained display SHALL NOT grant membership or routing readiness to JSON catalog requests.
 
-#### Scenario: Refresh fails after a usable table exists
-- **WHEN** a force-refresh phase fails and a last usable table is available
-- **THEN** the response displays that last usable table
-- **AND** prominently identifies that forced refresh failed and the displayed data is retained data
-- **AND** displays the failed attempt time
+#### Scenario: Background refresh fails after a usable table exists
+- **WHEN** background collection fails and a published table exists
+- **THEN** subsequent GET requests display that table with the failed attempt time and a warning
+- **AND** the last-successful-refresh time remains unchanged
 
-#### Scenario: Refresh fails without retained data
-- **WHEN** a force-refresh phase fails before any usable table has been produced
+#### Scenario: Manual refresh lacks CPA authority
+- **WHEN** an operator submits refresh and the required CPA snapshot is unavailable
 - **THEN** the system returns a non-success HTTP status and an error page
-- **AND** does not display an empty table as a successful refresh
+- **AND** does not display an empty or retained table as a successful refresh
+
+#### Scenario: Metadata source fails after a successful response
+- **WHEN** the current CPA snapshot admits a newly added model but a metadata source fails
+- **THEN** the table is recomposed with the newly admitted model and eligible retained metadata
+- **AND** it warns that stale inputs were used instead of labeling collection fully fresh
+
+### Requirement: Startup and scheduled refresh share the same bounded job
+The service SHALL initiate one full-chain refresh in the background at startup and at every configured scheduled interval (default `30m`). Entry-triggered refresh SHALL use an independently configurable success window (default `10m`). Both durations SHALL be positive; neither SHALL impose an ordering constraint on the other. Startup, scheduled, entry and manual triggers SHALL coalesce onto the same active job. Manual requests SHALL wait for that job unless the client disconnects; disconnect SHALL NOT cancel shared work. Shutdown SHALL stop the ticker and cancel/join active work before closing its cache. Existing JSON catalog request semantics and raw routing-snapshot ownership SHALL remain unchanged.
+
+#### Scenario: Manual request joins startup work
+- **GIVEN** the startup collection is still running
+- **WHEN** an operator submits the refresh form
+- **THEN** no second collection starts
+- **AND** the manual request waits for the startup collection and renders its result
+
+#### Scenario: Scheduled collection keeps data warm
+- **GIVEN** no operator visits the table
+- **WHEN** the scheduled interval elapses
+- **THEN** the same full-chain refresh job runs and publishes its result
+
+#### Scenario: Durations are independent
+- **WHEN** configuration sets the entry window to `2h` and the scheduled interval to `1m`
+- **THEN** both positive durations are accepted
+- **AND** an explicit zero, negative or malformed duration is rejected
+
+#### Scenario: Shutdown stops refresh work
+- **WHEN** the service shuts down with a refresh active
+- **THEN** the schedule stops and active refresh work is cancelled and joined
+- **AND** later triggers cannot start another job
 
 ### Requirement: Force-refresh action remains diagnostic-only
 The force-refresh route SHALL be reachable only through the existing localhost/Tailscale models-table diagnostic exposure and SHALL NOT be exposed by the public model-catalog entrance.
