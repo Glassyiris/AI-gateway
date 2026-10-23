@@ -15,7 +15,7 @@ Health has three separate meanings:
 | cli-proxy-api | Authenticated `GET /v1/models`, HTTP 200 and a JSON `data` array | CPA can serve its local catalog read path |
 | sub2api | `GET /health`, HTTP 200 | Application health endpoint; dependency semantics belong to Sub2API |
 | openai-api-cache-keeper | `GET /healthz`, HTTP 200 | Keeper HTTP liveness, not proof of cache writes, hits or replay |
-| responses-ws-sse-bridge | `GET :8086/healthz`, HTTP 200 | Bridge local liveness; added in source, active after the updated guard is deployed |
+| responses-ws-sse-bridge | `GET :8086/healthz`, HTTP 200 | Bridge local liveness; deployed 2026-10-23, see the [rollout record](deployment-batch-20261023.md#recovery-guard--deployed) |
 | models-enricher | `GET /healthz`, HTTP 200 | Enricher local liveness |
 | ai-sse-keepalive-proxy | `GET /healthz`, HTTP 200 | Keepalive proxy local liveness |
 | apisix | Local `GET /v1/models`, expected HTTP 404 | APISIX's local rejection route responds; no upstream request |

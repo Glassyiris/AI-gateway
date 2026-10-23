@@ -35,9 +35,16 @@ Third apply, explicitly capped as the last allowed attempt, succeeded after a fr
 - File baselines advance before pull/recreate succeed; failed apply can leave a baseline describing undeployed configuration.
 - Group-transaction CAS, automatic readiness/digest/image-present checks and all-neighbour verification are still absent from this legacy profile. This batch supplied external CAS, grouped private backups, image/revision/readiness and neighbour readback; they are not newly guaranteed by generic Ansible.
 
+## Recovery guard — deployed
+
+- `deploy-recovery` plan changed only `gateway-recovery.py`; apply succeeded. Private pre-operation four-file plus Compose snapshot: `/var/tmp/deploy-batch-20261023-recovery-before` (0700/0600), local receipt `/var/tmp/deploy-batch-20261023/recovery-rollback-receipt.json`. Guard SHA256 `8235b2b9c60ee5c7c56313ef0722f36e0bec29676caaaf8fde277c7c6a7cee90`; shared role probes SHA256 unchanged `3db2597b01e5a43218c769e17d526c314aca58543d8efbfd30fb222e115ebc8b`; unit files unchanged.
+- Actual timer cycle **06:09:29 UTC** reports eight application checks, all `ok=true`, including bridge8086. `startup_unit` reports `active`, `ok=true`, `action=observe_only`; timer is enabled/active. Coverage is 55 running / 55 observed, including the standalone relay; this count is not a claim that provider dependencies are all ready. No restart action was taken.
+- At 06:09:53 all 55 project-container identities and all three Compose hashes are unchanged; production/private-config still equal. Recovery regression 22/22 passes.
+- Four real smoke calls, zero retries, all completed with exact SSE/WS new-socket recall. Keeper HTTP 06:10:01/03 and WS 06:10:06/08 each show `stored=true`, `previous=false/true`; correlated Sub2API IDs `863f2aec-37f4-4947-bc83-e21888396b20`, `c54639cc-974a-407e-9aff-dff200ac1ff1`, `9bd10322-a7aa-4c77-b152-93dcfbebd30f`, `162a5822-52df-490d-a065-f2b172637941`. Concurrent unrelated traffic was not counted as smoke.
+
 ## Remaining steps
 
-Updated recovery guard and keeper `24h / 10000 / 0` observation are still pending at this checkpoint. Their source CI success is not production acceptance.
+Keeper `24h / 10000 / 0` deployment and remote observation are still pending at this checkpoint. The local notifier was explicitly dropped before implementation; none was built or armed. Source CI success is not production acceptance.
 
 ## Limits
 
