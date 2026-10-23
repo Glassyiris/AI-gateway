@@ -49,7 +49,7 @@ The design SHALL keep APISIX-native routing capabilities (ai-proxy-multi fallbac
 
 ### Requirement: Slash-rule passthrough to CPA or AISIX
 
-The internal instance SHALL forward classified model-bearing JSON HTTP inference requests (at minimum `POST /v1/responses` and `POST /v1/chat/completions`, including Sub2API `http_bridge` output) by the model ID slash rule: an ID containing `/` goes to the CPA upstream with the CPA service credential, and every other ID goes to the AISIX upstream with the caller credential. Request semantics, including SSE streaming, SHALL be preserved. Classification SHALL happen before inference with no cross-backend retry. Malformed classified payloads SHALL fail explicitly without forwarding. Requests outside the classified scope, including direct WebSocket upgrades and endpoints without a model-bearing JSON body, keep forwarding to CPA. Raw source discovery traffic never traverses this entrance; client catalog delivery through the entrance is retained.
+The internal instance SHALL forward classified model-bearing JSON HTTP inference requests (at minimum `POST /v1/responses` and `POST /v1/chat/completions`, including front-bridge WS turns forwarded through Sub2API as HTTP) by the model ID slash rule: an ID containing `/` goes to the CPA upstream with the CPA service credential, and every other ID goes to the AISIX upstream with the caller credential. Request semantics, including SSE streaming, SHALL be preserved. Classification SHALL happen before inference with no cross-backend retry. Malformed classified payloads SHALL fail explicitly without forwarding. Requests outside the classified scope, including direct WebSocket upgrades and endpoints without a model-bearing JSON body, keep forwarding to CPA. Raw source discovery traffic never traverses this entrance; client catalog delivery through the entrance is retained.
 
 #### Scenario: Slash ID chat completion reaches CPA
 - **WHEN** Sub2API sends `POST /v1/chat/completions` naming an ID that contains `/`
@@ -66,7 +66,8 @@ The internal instance SHALL forward classified model-bearing JSON HTTP inference
 #### Scenario: Direct WebSocket passes through to CPA
 - **WHEN** a client opens a direct WebSocket upgrade on `/v1/responses`
 - **THEN** the upgrade and frames pass through to CPA without classification
-- **AND** bare IDs on this path are not supported; Sub2API accounts use `http_bridge` instead
+- **AND** bare IDs on this direct-inner path are not supported; public WS turns SHALL instead terminate at keeper → stateless responses-ws-sse-bridge before reaching HTTP-only Sub2API, whose API-key accounts use WS mode `off`
+- **AND** keeper SHALL retain `IGNORE_CLIENT_STORE_FALSE=true`; Sub2API SHALL NOT move in front of keeper/bridge or use `passthrough`/`ctx_pool` for this chain, as explained in `docs/websocket-termination.md`
 
 #### Scenario: Chosen backend failure does not re-route
 - **WHEN** the selected backend returns 429/5xx, times out, or errors mid-stream

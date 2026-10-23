@@ -51,21 +51,29 @@ The entrance SHALL select the backend from the literal top-level `model` string 
 - **WHEN** a slash ID is classified and no CPA service credential is configured
 - **THEN** the entrance returns a 503-class error without forwarding
 
-### Requirement: Sub2API WebSocket ingress reaches the selector as HTTP
+### Requirement: Client WebSocket terminates before Sub2API
 
-Every Sub2API OpenAI API-key account SHALL set `extra.openai_apikey_responses_websockets_v2_mode` to `http_bridge` and `credentials.base_url` to `http://cli-proxy-api:8317/v1`, so client WebSocket turns arrive at the entrance as `POST /v1/responses` and are classified. The retired `/rk/v1` base URL SHALL NOT be used. This requirement SHALL be met with existing Sub2API configuration; gateway routing SHALL NOT be implemented by modifying Sub2API code.
+The public chain SHALL be public APISIX → keepalive → keeper → responses-ws-sse-bridge → Sub2API (HTTP/SSE only) → inner `apisix-models` slash selector → AISIX/CPA. Keeper SHALL remain a pure single-upstream cache with `IGNORE_CLIENT_STORE_FALSE=true`: forward and record a turn without a parent; expand a cached parent and remove `previous_response_id` before forwarding and recording; forward an unknown-parent request unchanged without recording that chain. The bridge SHALL be stateless and convert WS turns to POST/SSE without history storage or retries. Sub2API SHALL NOT be placed in front of keeper or the bridge. Reasons and native-WS tradeoffs are recorded in `docs/websocket-termination.md`.
+
+After the front bridge is live, every Sub2API OpenAI API-key account SHALL set `extra.openai_apikey_responses_websockets_v2_mode` to `off`, not `http_bridge`, `ctx_pool` or `passthrough`. Accounts using the unified CPA/AISIX entrance SHALL keep `credentials.base_url=http://cli-proxy-api:8317/v1`; third-party upstream accounts SHALL retain their own URLs. The retired `/rk/v1` base URL SHALL NOT be used. This requirement SHALL be met without modifying Sub2API code for gateway requirements.
 
 #### Scenario: Bare ID over client WebSocket
-- **WHEN** a client opens a Responses WebSocket through Sub2API and sends a turn naming a bare ID
-- **THEN** Sub2API sends `POST /v1/responses` to the entrance and the request reaches AISIX
+- **WHEN** a client sends a Responses WS turn naming a bare ID through the public chain
+- **THEN** keeper forwards or expands it to the stateless bridge, which sends HTTP to Sub2API
+- **AND** Sub2API sends `POST /v1/responses` to the entrance and the request reaches AISIX
 
-#### Scenario: Account left on ctx_pool or /rk
-- **WHEN** an account uses `ctx_pool` or a `/rk/v1` base URL
-- **THEN** this is a configuration defect: bare IDs over WebSocket reach CPA directly, and `/rk` requests receive 404
+#### Scenario: Cached continuation after reconnect
+- **WHEN** a client reconnects and sends a cached parent plus new input only
+- **THEN** keeper expands the full history and removes the parent before the bridge sends the HTTP turn to Sub2API
+
+#### Scenario: Account left on a WebSocket mode or /rk
+- **WHEN** an account uses `http_bridge`, `ctx_pool`, `passthrough` or a `/rk/v1` base URL after this cutover
+- **THEN** this violates the HTTP-only account contract, and `/rk` requests receive 404
+- **AND** the front bridge SHALL NOT be bypassed to accommodate that configuration
 
 ### Requirement: Classification scope is the model-bearing HTTP seam
 
-Classification SHALL apply only to the enumerated model-bearing JSON HTTP inference paths of the unified entrance: at minimum `POST /v1/responses` and `POST /v1/chat/completions`, including requests Sub2API's `http_bridge` emits as HTTP inference calls. The selector routes SHALL take precedence over the CPA-direct routes for those paths, so the original requested model ID reaches the selected backend untouched. A direct WebSocket upgrade to the entrance SHALL NOT be classified; it keeps forwarding to CPA and is therefore correct only for model IDs containing `/`. A request on a classified path whose JSON body is malformed or whose model field cannot be extracted SHALL fail explicitly with a protocol-shaped error, never silently fall through to a backend.
+Classification SHALL apply only to the enumerated model-bearing JSON HTTP inference paths of the unified entrance: at minimum `POST /v1/responses` and `POST /v1/chat/completions`, including client WS turns converted by the front stateless bridge and forwarded as HTTP inference through Sub2API. The selector routes SHALL take precedence over the CPA-direct routes for those paths, so the original requested model ID reaches the selected backend untouched. A direct WebSocket upgrade to the entrance SHALL NOT be classified; it keeps forwarding to CPA and is therefore correct only for model IDs containing `/`. A request on a classified path whose JSON body is malformed or whose model field cannot be extracted SHALL fail explicitly with a protocol-shaped error, never silently fall through to a backend.
 
 #### Scenario: Direct WebSocket stays outside the selector
 - **WHEN** a client opens a direct WebSocket upgrade to the entrance

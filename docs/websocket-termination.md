@@ -1,6 +1,6 @@
 # Decision: terminate WebSocket in front of Sub2API
 
-Status: **decided 2026-10-23, not yet deployed.** Production still uses Sub2API `http_bridge`; see [model-routing.md](model-routing.md).
+Status: **deployed 2026-10-23.** Bridge started 02:05:00 UTC, keeper cut over 02:07:35 UTC, nine account WS modes changed to `off` at 02:09:54 UTC. Correlated production and installed-Pi acceptance completed afterwards; bounded limitations are recorded below. See [model-routing.md](model-routing.md).
 
 Read this before you move the keeper, change Sub2API WebSocket mode, or remove the ws→sse bridge.
 
@@ -34,7 +34,7 @@ Fixing 2 or 3 means patching Sub2API, which the architecture rule forbids for ou
 
 The front placement was locally verified on 2026-10-23 with the same real Sub2API image and a stub model upstream: the report lists 22 scenario rows and reports 44 passing assertions, with keeper `30c0e5a` and bridge `24326a4` (`/var/tmp/sub2api-seam2-20261023/RESULT.md`). This is not production or installed-Pi acceptance. Reconnect continuation, the socket surviving `previous_response_not_found`, WS↔HTTP continuation, key authentication through both hops, and the startup responses probe all passed.
 
-## Why not Sub2API `http_bridge` (the current production setting)
+## Why not Sub2API `http_bridge` (the previous production setting)
 
 On parent plus delta turns, `http_bridge` rebuilds the history from the same socket only:
 
@@ -57,6 +57,31 @@ Every hop after the client is HTTP anyway. One conversion point, in our own code
 - Each turn resends full history to Sub2API and further upstream: more bandwidth. Any upstream prompt-cache benefit is separate and not guaranteed by this topology.
 - Keeper retains one bounded turn's output until terminal (1 MiB/event, 16 MiB shared working bound); it is not an unbounded, fully streaming history store. Late storage failure can leave a stable `resp_` alias without a continuable entry. These are bounded known issues, not waived protocol or leak failures.
 - An HTTP request whose parent the keeper has never seen still reaches Sub2API's owner check, which answers with the non-standard 400. Such a parent cannot be continued in any case.
+
+## Production validation, 2026-10-23
+
+Immutable registry images (no production source build):
+
+| Component | Source commit | Index digest |
+| --- | --- | --- |
+| keeper | `0b4e92695e33c9c2b20d55a286514faaf88712c4` | `sha256:e2b80ae2980bfaf0865666e4dfc3da684ae47c6280343f97fa3f93711cbca4e2` |
+| responses-ws-sse-bridge | `6af0a3ef95c6a6f1e1cd8fe353b974196fdc2d44` | `sha256:3b23fd0963d415d32beefa783fc50d83d03342d3c95d2551554afbc5dd006caa` |
+
+Keeper's reviewed `30c0e5a` received only a gofmt correction. Bridge's published graph squashes reviewed `24326a4`, removes generated binary/log artifacts, fixes topology documentation, and applies gofmt; Go source is otherwise unchanged. CI passed for both images and gateway config (`742c226`, documentation `222da19`). Sub2API's image/code was not changed; 53 preexisting containers other than keeper retained IDs, start times and restart counts.
+
+- 140/220 capped inference/WS-create attempts counted; no failed inference retried. Fresh evidence: `/var/tmp/ws-front-acceptance-20261023/`; deployment/rollback receipt: `/var/tmp/ws-front-deploy-20261023/REPORT.md`.
+- HTTP B3 marker recall: **9 pass / 1 fail / 2 inconclusive**, versus **0 / 9 / 2** before. The remaining failed sample returned `incomplete: max_output_tokens` at the 64-token cap with no visible text; it does not demonstrate lost history and was not retried. Ten first-turn channel/auth/balance/model failures remain, not silently relabelled as cache passes.
+- Branch rollback/forward: **6/6**; WS same/new-socket/store:false/recovery: **20/20**; HTTP post-abort completed-parent recovery: **2/2**; independent WS recovery/store:false fixtures: **9/9**. Unknown-parent WS error leaves the same socket usable. Both bare/slash chat/completions streams reached `[DONE]`.
+- Installed Pi `1.3.0-xz.357.1.g99aba2a8`, plugin `0dfd75d`: **4/4** turns with normal HOME, task-only strict `websocket-cached` settings, retries off. Wire observation proved second turns sent parent plus **one input item on a new socket**, not full-history replay. Both `codex/gpt-6-sol` and bare `claude-opus-5-5` recalled assistant-invented markers. The test guard capped output, requested low effort/store:true, and deliberately closed the first completed socket. No global client settings/model IDs were changed.
+- Server correlation: keeper previous-hit records, Sub2API POST records, AISIX exact response IDs and bare input models, and inner APISIX upstream addresses (CPA `172.30.35.3:8317`, AISIX `172.30.70.3:3000`). CPA stdout had no request records under existing logging settings; direct CPA model-log coverage is not claimed.
+- Actual process `/proc` VmRSS: keeper **11096 → 9360 KiB**, FDs **11 → 11**; bridge **8240 → 7784 KiB**, FDs **9 → 9**. CPU deltas over 769.6 seconds: **1.76 s / 0.67 s** respectively (includes ordinary live traffic). Both healthy, restart count **0**, no OOM, no remaining spools. These are bounded observations, not an exhaustive leak proof or a production CPU profile.
+
+Additional known limitations:
+
+- Pi's first catalog discovery timed out. One read-only warm of public versioned `/v1/models` returned **200 in 10.055 seconds**; real Pi then discovered models normally, without a fixture. That route serially fetches Sub2API entitlement through the front chain and metadata through the catalog sidecar. Catalog latency remains a separate preexisting issue, not hidden as successful inference.
+- Production `/v1/messages` returned **403**, `This group does not allow /v1/messages dispatch`, for both tested IDs; this credential cannot establish end-to-end Anthropic inference. No group permissions were changed. Local byte-transparency tests remain the evidence for those streams.
+- Keeper WS `logTurn` runs when the client frame is prepared, before upstream terminal storage. Its `stored=false`/short duration are not final storage outcomes. Client `store:true`, exact delta-only reconnect recall, and subsequent hit records establish retention; HTTP completion logs also show `stored=true`.
+- Unknown HTTP parents retain the non-standard 400; aborted ids are not required to be retained. Bare Opus's explicit tool-choice rejection and channel inventory/credit failures remain upstream issues. No exhaustive fuzz/standards certification, TTL-long soak or all-account traffic exercise is claimed.
 
 ## Do not
 

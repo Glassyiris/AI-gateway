@@ -1,8 +1,8 @@
-# Model routing and Sub2API WebSocket bridge
+# Model routing and front WebSocket bridge
 
 Read this before you change `apisix-models/`, Sub2API account settings, or the keeper chain.
 
-> Planned change (decided 2026-10-23, not deployed): WebSocket will end at the keeper and the ws→sse bridge in front of Sub2API, and Sub2API will see only HTTP. For the reasons, read [websocket-termination.md](websocket-termination.md). Until then, the `http_bridge` contract below applies.
+> Deployed 2026-10-23, keeper cutover 02:07:35 UTC; correlated acceptance completed afterwards. Keeper and the ws→sse bridge end WebSocket before Sub2API; Sub2API sees only HTTP/SSE. Read [websocket-termination.md](websocket-termination.md) for the decision, tradeoffs and validation limits.
 
 ## The rule
 
@@ -22,7 +22,8 @@ Do not reintroduce `/routing-index` lookups, last-known-good caches or a "regist
 ## Topology
 
 ```text
-Pi ─► public APISIX ─► keepalive ─► openai-api-cache-keeper ─► Sub2API
+Pi ─WS/HTTP─► public APISIX ─► keepalive ─► openai-api-cache-keeper
+   ─WS/HTTP─► responses-ws-sse-bridge ─HTTP/SSE─► Sub2API (account WS mode off)
 Sub2API account base_url http://cli-proxy-api:8317/v1
    └─► sub2api-cpa-relay ─► apisix-models :9080
           POST /v1/responses, /v1/chat/completions ─► routing_selector ─► AISIX | CPA
@@ -35,7 +36,7 @@ Sub2API account base_url http://cli-proxy-api:8317/v1
 
 APISIX reads the model only from an HTTP request body. A WebSocket upgrade is a body-less GET, and the model arrives later inside frames that APISIX passes through without inspection. A direct WebSocket therefore falls to `catch-all` and reaches CPA, which only knows slash IDs. Bare IDs then fail with `Connection error`.
 
-Sub2API's existing `http_bridge` mode turns each client WebSocket turn into `POST /v1/responses`, which the selector can classify.
+Our stateless `responses-ws-sse-bridge` turns each client WebSocket turn into `POST /v1/responses` before Sub2API, which the selector can classify. Keeper runs before that bridge with `UPSTREAM_URL=http://127.0.0.1:8086` and `IGNORE_CLIENT_STORE_FALSE=true`; known parents are expanded there. Do not restore Sub2API `http_bridge`, `ctx_pool` or `passthrough` for this chain.
 
 ## Sub2API account contract
 
@@ -44,7 +45,7 @@ Every OpenAI API-key account in Sub2API:
 | Field | Required value |
 | --- | --- |
 | `credentials.base_url` | `http://cli-proxy-api:8317/v1` (third-party upstreams such as SiliconFlow keep their own URL) |
-| `extra.openai_apikey_responses_websockets_v2_mode` | `http_bridge` |
+| `extra.openai_apikey_responses_websockets_v2_mode` | `off` (only after the front bridge is live) |
 | API key | private `sub2api` caller key from `aisix/caller-keys.json` (CPA-backed accounts) |
 
 Never use `/rk/v1`; that alias was removed with the old keeper and now returns 404. Never set `ctx_pool` or `passthrough` on these accounts.
@@ -52,18 +53,22 @@ Never use `/rk/v1`; that alias was removed with the old keeper and now returns 4
 Read-only check on the production host:
 
 ```sh
-docker exec -i ai-gateway-postgres-1 psql -XAtq -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c \
- "SELECT id, name, credentials->>'base_url', extra->>'openai_apikey_responses_websockets_v2_mode'
-    FROM accounts WHERE deleted_at IS NULL AND platform='openai' AND type='apikey' ORDER BY id;"
+docker exec -i ai-gateway-postgres-1 sh -c \
+ 'exec psql -XAtq -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
+BEGIN READ ONLY;
+SELECT id, name, credentials->>'base_url', extra->>'openai_apikey_responses_websockets_v2_mode'
+  FROM accounts WHERE deleted_at IS NULL AND platform='openai' AND type='apikey' ORDER BY id;
+ROLLBACK;
+SQL
 ```
 
-Every row must show `http_bridge`. No row may contain `/rk/`. Change accounts only through the Sub2API admin API, never by direct SQL writes.
+Every row must show `off`. No row may contain `/rk/`. Change accounts only through the Sub2API admin API, never by direct SQL writes. On 2026-10-23 accounts 1,3,4,5,6,9,10,11,12 changed only this WS mode field; credentials and base URLs stayed unchanged. To roll back, restore their prior `http_bridge` mode before reverting keeper to its old image/upstream.
 
 ## Architecture boundary
 
 Do not implement gateway requirements by modifying Sub2API code. Routing, aggregation and WebSocket handling belong to APISIX, AISIX and keeper layers, or to Sub2API's existing configuration. Patch Sub2API only for a genuine Sub2API bug that reproduces with Sub2API alone, with a minimal fix and explicit operator approval.
 
-Known Sub2API bridge limitation, not yet fixed: on one WebSocket, a turn that sends `previous_response_id` plus only new input loses the earlier assistant message. A parent that the bridge cannot resolve is silently dropped. Pi sends full history each turn and is not affected. Clients relying on `previous_response_id` deltas are.
+Sub2API's built-in bridge loses earlier assistant output on parent-plus-delta turns and silently drops unresolved parents. Front termination avoids that path without a Sub2API patch: keeper expands known parents before the HTTP request reaches Sub2API. Unknown WS parents receive the bridge's standard `previous_response_not_found`; unknown HTTP parents still receive Sub2API's non-standard owner-check 400.
 
 ## Incident 2026-10-22: how this broke
 
