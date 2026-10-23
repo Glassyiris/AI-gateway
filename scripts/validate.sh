@@ -298,13 +298,14 @@ networks = compose.get("networks") or {}
 if not services or not networks:
     raise SystemExit("Compose must define services and networks")
 # Persistent application state stays in backed-up data/ binds. Each disposable
-# cache has one named disk volume, mounted only by its owner at its cache path.
+# cache/spool has one named disk volume, mounted only by its owner at its path.
 CACHE_VOLUMES = {
     "openai-api-cache-keeper-cache": ("openai-api-cache-keeper", "/var/tmp/openai-api-cache-keeper"),
     "models-enricher-cache": ("models-enricher", "/var/cache/models-enricher"),
+    "responses-ws-sse-bridge-spool": ("responses-ws-sse-bridge", "/spool"),
 }
 if "default" in networks or set(compose.get("volumes") or {}) != set(CACHE_VOLUMES):
-    raise SystemExit("default network forbidden; only keeper and enricher cache volumes may be defined")
+    raise SystemExit("default network forbidden; only dedicated cache/spool volumes may be defined")
 def volume_mounts(config):
     """(source, target) pairs; docker compose JSON uses long form, YAML may keep short form."""
     for volume in config.get("volumes", []):
@@ -512,20 +513,21 @@ if selector_service.get("ports") or selector_service.get("network_mode") != "ser
 if "/opt/apisix/custom/routing_selector.lua" not in volume_targets(selector_service):
     raise SystemExit("catalog routing selector module must be mounted read-only into APISIX")
 
-# One front keeper shares keepalive's namespace and forwards only to Sub2API.
+# One front keeper and a stateless WS bridge share keepalive's namespace.
 keeper = services.get("openai-api-cache-keeper", {})
 keeper_env = keeper.get("environment") or {}
 if keeper.get("network_mode") != "service:ai-sse-keepalive-proxy-netns" or keeper.get("ports") or keeper.get("networks"):
     raise SystemExit("cache keeper must share only the keepalive namespace without ports")
 keeper_target = {
-    "UPSTREAM_URL": "http://sub2api-ai-sse-relay:8080",
+    "UPSTREAM_URL": "http://127.0.0.1:8086",
     "LISTEN_ADDR": "127.0.0.1:8085",
     "STORE_DIR": "/var/tmp/openai-api-cache-keeper",
+    "IGNORE_CLIENT_STORE_FALSE": "true",
 }
 if any(keeper_env.get(k) != v for k, v in keeper_target.items()) \
         or {"CPA_API_KEY", "ROUTING_INDEX_URL", "UPSTREAM_CPA_URL", "UPSTREAM_AISIX_URL"} & set(keeper_env) \
         or str(keeper_env.get("REQUIRE_NO_DEFAULT_ROUTE")) != "true":
-    raise SystemExit("cache keeper must use one Sub2API upstream, not model routing or a CPA key")
+    raise SystemExit("cache keeper must retain client turns and use only the local WS bridge, not model routing")
 keepalive = services.get("ai-sse-keepalive-proxy", {})
 if (keepalive.get("environment") or {}).get("UPSTREAM_URL") != "http://127.0.0.1:8085" \
         or ((keepalive.get("depends_on") or {}).get("openai-api-cache-keeper") or {}).get("condition") != "service_healthy":
@@ -541,6 +543,23 @@ if "no-new-privileges:true" not in keeper.get("security_opt", []) \
         or str(keeper.get("memswap_limit")).lower() not in {"384m", str(384 * 1024 * 1024)} \
         or int(keeper.get("pids_limit") or 0) != 64 or float(keeper.get("cpus") or 0) != 0.5:
     raise SystemExit("cache keeper must retain 384 MiB, no swap, 0.5 CPU and 64 PIDs")
+bridge = services.get("responses-ws-sse-bridge", {})
+bridge_env = bridge.get("environment") or {}
+if bridge.get("network_mode") != "service:ai-sse-keepalive-proxy-netns" or bridge.get("ports") or bridge.get("networks"):
+    raise SystemExit("WS bridge must share only the keepalive namespace without ports")
+if any(bridge_env.get(k) != v for k, v in {
+    "UPSTREAM_URL": "http://sub2api-ai-sse-relay:8080", "LISTEN_ADDR": "127.0.0.1:8086", "SPOOL_DIR": "/spool", "GOMEMLIMIT": "192MiB",
+}.items()) or bridge.get("tmpfs"):
+    raise SystemExit("WS bridge must send HTTP to Sub2API and spool on disk")
+if str(bridge.get("user")) != "65534:65534" or bridge.get("read_only") is not True or {str(cap).upper() for cap in bridge.get("cap_drop", [])} != {"ALL"} or bridge.get("cap_add"):
+    raise SystemExit("WS bridge must be non-root/read-only and drop all capabilities")
+if "no-new-privileges:true" not in bridge.get("security_opt", []) \
+        or str(bridge.get("mem_limit")).lower() not in {"256m", str(256 * 1024 * 1024)} \
+        or str(bridge.get("memswap_limit")).lower() not in {"256m", str(256 * 1024 * 1024)} \
+        or int(bridge.get("pids_limit") or 0) != 64 or float(bridge.get("cpus") or 0) != 0.5:
+    raise SystemExit("WS bridge must retain 256 MiB, no swap, 0.5 CPU and 64 PIDs")
+if ((keeper.get("depends_on") or {}).get("responses-ws-sse-bridge") or {}).get("condition") != "service_healthy":
+    raise SystemExit("keeper must wait for the healthy WS bridge")
 if (sub2api_env := services.get("sub2api", {}).get("environment") or {}).get("GATEWAY_OPENAI_WS_INGRESS_PREVIOUS_RESPONSE_RECOVERY_ENABLED") is None:
     raise SystemExit("Sub2API must pin WS previous_response recovery explicitly")
 

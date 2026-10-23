@@ -64,7 +64,7 @@ class StandardCacheTopology(unittest.TestCase):
         self.assertIn("UPSTREAM_URL: http://127.0.0.1:8085", keepalive)
         self.assertIn("openai-api-cache-keeper: {condition: service_healthy", keepalive)
         keeper = section(self.compose, "  openai-api-cache-keeper:\n")
-        for value in ("network_mode: service:ai-sse-keepalive-proxy-netns", "UPSTREAM_URL: http://sub2api-ai-sse-relay:8080", "LISTEN_ADDR: 127.0.0.1:8085", "STORE_DIR: /var/tmp/openai-api-cache-keeper"):
+        for value in ("network_mode: service:ai-sse-keepalive-proxy-netns", "UPSTREAM_URL: http://127.0.0.1:8086", "LISTEN_ADDR: 127.0.0.1:8085", "STORE_DIR: /var/tmp/openai-api-cache-keeper", 'IGNORE_CLIENT_STORE_FALSE: "true"', "responses-ws-sse-bridge: {condition: service_healthy"):
             self.assertIn(value, keeper)
         for value in ("ROUTING_INDEX_URL", "UPSTREAM_CPA_URL", "UPSTREAM_AISIX_URL", "CPA_API_KEY"):
             self.assertNotIn(value, keeper)
@@ -77,6 +77,16 @@ class StandardCacheTopology(unittest.TestCase):
         self.assertNotIn("tmpfs:", keeper)
         self.assertNotIn("    ports:", keeper)
         self.assertNotIn("    networks:", keeper)
+
+    def test_bridge_is_stateless_private_and_bounded(self):
+        bridge = section(self.compose, "  responses-ws-sse-bridge:\n")
+        for value in ("network_mode: service:ai-sse-keepalive-proxy-netns", "UPSTREAM_URL: http://sub2api-ai-sse-relay:8080", "LISTEN_ADDR: 127.0.0.1:8086", "SPOOL_DIR: /spool", "GOMEMLIMIT: 192MiB", 'user: "65534:65534"', "pids_limit: 64", "mem_limit: 256m", "memswap_limit: 256m", "cpus: 0.5", "read_only: true", "cap_drop: [ALL]", "no-new-privileges:true", "responses-ws-sse-bridge-spool:/spool"):
+            self.assertIn(value, bridge)
+        for value in ("tmpfs:", "    ports:", "    networks:", "STORE_DIR", "CPA_API_KEY"):
+            self.assertNotIn(value, bridge)
+        reference = re.search(r"image: \$\{RESPONSES_WS_SSE_BRIDGE_IMAGE:-([^}]+)\}", bridge).group(1)
+        self.assertRegex(reference, r"^ghcr\.io/xz-dev/responses-ws-sse-bridge:[0-9a-f]{40}@sha256:[0-9a-f]{64}$")
+        self.assertIn(f"RESPONSES_WS_SSE_BRIDGE_IMAGE={reference}\n", (ROOT / ".env.example").read_text())
 
     def test_published_images_match_gitlinks_and_environment(self):
         env = (ROOT / ".env.example").read_text()
@@ -105,17 +115,19 @@ class StandardCacheTopology(unittest.TestCase):
         program = 'services = compose.get("services") or {}\n' + program
         keeper = "openai-api-cache-keeper"
         enricher = "models-enricher"
+        bridge = "responses-ws-sse-bridge"
         cache = {
             "services": {
                 keeper: {"volumes": [keeper + "-cache:/var/tmp/" + keeper]},
+                bridge: {"volumes": [bridge + "-spool:/spool"]},
                 enricher: {"volumes": [enricher + "-cache:/var/cache/" + enricher], "environment": {"CACHE_DIR": "/var/cache/" + enricher}},
             },
-            "volumes": {keeper + "-cache": {}, enricher + "-cache": {}},
+            "volumes": {keeper + "-cache": {}, enricher + "-cache": {}, bridge + "-spool": {}},
             "networks": {"isolated": {}},
         }
         exec(program, {"compose": cache})
         cases = []
-        for volume, owner, target in ((keeper + "-cache", keeper, "/var/tmp/" + keeper), (enricher + "-cache", enricher, "/var/cache/" + enricher)):
+        for volume, owner, target in ((keeper + "-cache", keeper, "/var/tmp/" + keeper), (enricher + "-cache", enricher, "/var/cache/" + enricher), (bridge + "-spool", bridge, "/spool")):
             for name in ("foreign-owner", "wrong-target", "missing-mount", "missing-volume"):
                 bad = copy.deepcopy(cache)
                 if name == "foreign-owner":
