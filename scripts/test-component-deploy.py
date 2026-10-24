@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Fast guards; full isolated Ansible lifecycle: test-component-apply.py."""
+import configparser
 import importlib.util
 import json
 import os
 from pathlib import Path
 import re
 import socket
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -151,6 +154,51 @@ class OwnedLock(unittest.TestCase):
             p.mkdir(parents=True)
             (p / 'cmdline').write_bytes(b'\0'.join(s.encode() for s in argv))
         self.assertEqual(set(LOCK.live_writers(proc, set())), {2, 3})
+
+
+class SSHModuleOutput(unittest.TestCase):
+    def test_automation_does_not_request_a_terminal(self):
+        config = configparser.ConfigParser()
+        config.read(ROOT / 'ansible/ansible.cfg')
+        self.assertFalse(config.getboolean('ssh_connection', 'usetty', fallback=True))
+
+    @unittest.skipUnless(importlib.util.find_spec('ansible'), 'requires installed Ansible SSH plugin')
+    def test_async_json_is_not_prefixed_by_pam_terminal_context(self):
+        # Exercise the real SSH argv selection and JSON filter, without a server.
+        probe = r'''
+import json
+from unittest.mock import patch
+from ansible.playbook.play_context import PlayContext
+from ansible.plugins.action import _filter_non_json_lines
+from ansible.plugins.loader import connection_loader
+context = PlayContext()
+context.remote_addr, context.remote_user = 'fixture', 'root'
+connection = connection_loader.get('ssh', context)
+connection.set_options()
+body = b'{"started":true,"ansible_job_id":"fixture"}'
+start = b'\x1b]3008;start=fixture;comm=su;type=session\x1b\\'
+end = b'\x1b]3008;end=fixture\x1b\\'
+def remote(command, *args, **kwargs):
+    return 0, start + body + b'\r\n' + end if '-tt' in command else body, b''
+def parse():
+    _, stdout, _ = connection.exec_command('async_wrapper')
+    filtered, _ = _filter_non_json_lines(stdout.decode(), objects_only=True)
+    return json.loads(filtered)
+with patch.object(connection, '_build_command', side_effect=lambda exe, subsystem, *args: list(args)), patch.object(connection, '_run', side_effect=remote):
+    assert parse()['started'] is True
+    connection.set_options(direct={'use_tty': True})
+    try:
+        parse()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('forced-PTY negative control did not reject OSC-prefixed JSON')
+'''
+        env = dict(os.environ, ANSIBLE_CONFIG=str(ROOT / 'ansible/ansible.cfg'))
+        env.pop('ANSIBLE_SSH_USETTY', None)
+        result = subprocess.run([sys.executable, '-c', probe], env=env, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout)
 
 
 class TaskOrdering(unittest.TestCase):
