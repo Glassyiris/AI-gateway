@@ -100,6 +100,46 @@ defaults. Key ones:
 | `ai_ops_models_enricher_verify_retries` / `ai_ops_models_enricher_verify_delay_seconds` | `30` / `2` | bounded wait for the recreated models-enricher readiness |
 | `ai_ops_adopted_direct_models` / `ai_ops_standalone_retained` | `[]` | AISIX orphan-report approval/exclusion lists |
 
+## Worker-owned CPA configuration
+
+`data/cpa/conf/config.yaml` belongs to CPA and cpa-model-sync. Scheduled model
+updates legitimately change it. A private-config copy is an optional initial
+seed, not desired state. Only the `cli-proxy-api` and `cpa-model-sync` component
+profiles check that the **live** file exists and parses as a YAML mapping, without
+printing secrets or enforcing a schema. CPA upgrades/UI edits cannot block
+unrelated profiles such as keeper. Preflight never writes, repairs or bootstraps
+this file. It is not an input to file deploy/rollback operations.
+
+Ansible component operations manage only `compose.yaml`, `compose.override.yaml`
+and `.env`. CPA runtime config was never in that three-file CAS/baseline set.
+The 2026-10-24 "13-file global gate" was a manual `exercise.py` precheck, not
+Ansible behavior; CPA model drift did not itself block Ansible component plans.
+Exclude this worker-owned file from such external equality gates. Historical
+`data__cpa__conf__config.yaml.baseline` files are not authoritative: do not advance
+or restore them, and do not repeatedly adopt scheduled model changes into a seed.
+
+For a new host, initialize this file explicitly **before** planning a component.
+After confirming it is missing, prepare its parent directory privately (0700)
+and review the private seed. From `ansible/`, this one-time copy refuses to replace
+an existing live file, including one created after the missing-file check:
+
+```bash
+ansible gateway -l rainyun-la -m ansible.builtin.copy \
+  -a 'src=private-config/data/cpa/conf/config.yaml dest=/root/AI-gateway/data/cpa/conf/config.yaml force=false mode=0600' \
+  --extra-vars '{"ansible_diff_always": false}'
+```
+
+Keep command output private and do not use `--diff`; the file contains credentials.
+Read back the file and run the normal read-only component plan to validate it.
+This is initialization, not permission to overwrite a running CPA configuration.
+
+For the generic cpa-model-sync component profile, `ready` uses the existing
+completed-cycle progress signal (`worker_health.ok`), together with running,
+unpaused, non-restarting process state. A stalled/missing progress signal is not
+healthy. `upstream_ready` reports the existing dependency-ready signal separately;
+rejected upstream credentials do not force worker activation. This does not weaken
+the separate `deploy-model-sync` policy-change preview/readback contract below.
+
 ## Drift gate
 
 Component `deploy`/`rollback` use the grouped three-file and runtime CAS described
