@@ -62,6 +62,25 @@
   register: _ai_ops_cfg
   failed_when: not (_ai_ops_cfg.stat.exists and _ai_ops_cfg.stat.isdir)
 
+- name: Check worker-owned CPA YAML only for CPA component operations
+  when: service | default('') in ['cli-proxy-api', 'cpa-model-sync']
+  block:
+    - name: Read live CPA config without exposing credentials
+      ansible.builtin.slurp:
+        src: "{{ ai_ops_deploy_root }}/data/cpa/conf/config.yaml"
+      register: _cpa_live_yaml
+      no_log: true
+
+    - name: Parse live CPA YAML on the controller
+      ansible.builtin.set_fact:
+        _cpa_document: "{{ _cpa_live_yaml.content | b64decode | from_yaml }}"
+      no_log: true
+
+    - name: Require a live CPA YAML mapping without enforcing a config schema
+      ansible.builtin.assert:
+        that: _cpa_document is mapping
+      no_log: true
+
 - name: Ensure protected state dir (apply only)
   ansible.builtin.file:
     path: "{{ ai_ops_deploy_root }}/.ai-ops-state"

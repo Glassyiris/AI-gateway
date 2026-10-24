@@ -96,7 +96,8 @@ class Fixture:
         self.exe.chmod(0o700)
         self.old = 'test/component:old@sha256:' + 'b' * 64
         self.new = 'test/component:new@sha256:' + 'd' * 64
-        if service == 'responses-ws-sse-bridge':
+        front = service in ('responses-ws-sse-bridge', 'openai-api-cache-keeper')
+        if front:
             self.old = 'ghcr.io/xz-dev/' + service + ':' + 'a'*40 + '@sha256:' + 'b'*64
             self.new = self.old.replace('b'*64, 'd'*64)
         if service == 'cloudflared':
@@ -105,8 +106,10 @@ class Fixture:
         env = {'MODE': 'old'}
         if service == 'responses-ws-sse-bridge':
             env = {'PORT':'8086','LISTEN_ADDR':'127.0.0.1:8086','UPSTREAM_URL':'http://sub2api-ai-sse-relay:8080'}
+        elif service == 'openai-api-cache-keeper':
+            env = {'LISTEN_ADDR':'127.0.0.1:8085','UPSTREAM_URL':'http://127.0.0.1:8086','IGNORE_CLIENT_STORE_FALSE':'true'}
         config = {'services': {service: {'image': self.old, 'environment': env, 'pull_policy': 'never'}, 'protected': {'image': 'untouched'}}}
-        if service == 'responses-ws-sse-bridge':
+        if front:
             config['services'][service]['network_mode'] = 'service:ai-sse-keepalive-proxy-netns'
         for d in (self.live, self.source):
             (d / 'compose.yaml').write_text(json.dumps(config))
@@ -121,12 +124,12 @@ class Fixture:
                     'Config':{'Labels':{'com.docker.compose.project':'ai-gateway','com.docker.compose.service':name},'Image':reference,
                               'Env':[k+'='+v for k,v in env.items()] if name==service else []},
                     'State':{'Running':True,'Pid':os.getpid(),'Paused':False,'Restarting':False,'StartedAt':'2026-10-23T08:00:00Z'},
-                    'HostConfig':{'NetworkMode':'container:owner' if service=='responses-ws-sse-bridge' and name==service else 'bridge'}}
+                    'HostConfig':{'NetworkMode':'container:owner' if front and name==service else 'bridge'}}
         target = container(service, 'target-old', 'sha256:'+'a'*64, self.old)
         if native:
             target['State']['Health'] = {'Status':'healthy'}
         containers = [target]
-        if service=='responses-ws-sse-bridge':
+        if front:
             containers.append(container('ai-sse-keepalive-proxy-netns','owner','owner-image','owner-ref'))
         containers.append(container('protected','protected','protected-image','protected-ref'))
         self.statefile = self.bin / 'state.json'
@@ -135,6 +138,9 @@ class Fixture:
         state.mkdir(mode=0o700)
         for file in ('compose.yaml','compose.override.yaml','.env'):
             shutil.copyfile(self.live/file, state/(file+'.baseline'))
+        self.cpa = self.live / 'data/cpa/conf/config.yaml'
+        self.cpa.parent.mkdir(parents=True)
+        shutil.copyfile(ROOT / 'cpa/config.example.yaml', self.cpa)
         self.initial_baselines = self.baselines()
         inventory = self.home / 'inventory'
         inventory.write_text('[gateway]\nfixture ansible_connection=local ansible_python_interpreter=/usr/bin/python3\n')
@@ -214,14 +220,54 @@ def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--evidence', type=Path, required=True)
     parser.add_argument('--mutation', choices=['no-image-proof','early-baseline','no-progress','no-native-probe','no-group-cas','no-neighbour-check'])
-    parser.add_argument('--case', choices=['skip','digest','rollback','kill','native','generic','cas','neighbour','front','preload'], action='append')
+    parser.add_argument('--case', choices=['skip','digest','rollback','kill','native','generic','cas','neighbour','front','preload','worker','cpa-config','keeper-config'], action='append')
     args=parser.parse_args()
     args.evidence.mkdir(parents=True,exist_ok=True,mode=0o700)
     server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Probe)
     threading.Thread(target=server.serve_forever,daemon=True).start()
-    for case in args.case or ['skip','digest','rollback','kill','native','generic','cas','neighbour','front','preload']:
-        f=Fixture(args.evidence,case,'aisix-status' if case=='native' else 'responses-ws-sse-bridge' if case=='front' else 'cloudflared' if case=='preload' else 'models-enricher',native=case!='native')
+    for case in args.case or ['skip','digest','rollback','kill','native','generic','cas','neighbour','front','preload','worker','cpa-config','keeper-config']:
+        f=Fixture(args.evidence,case,'aisix-status' if case=='native' else 'responses-ws-sse-bridge' if case=='front' else 'cloudflared' if case=='preload' else 'cpa-model-sync' if case=='worker' else 'cli-proxy-api' if case=='cpa-config' else 'openai-api-cache-keeper' if case=='keeper-config' else 'models-enricher',native=case not in ('native','worker'))
         try:
+            if case in ('worker','cpa-config','keeper-config'):
+                shutil.copyfile(f.live/'compose.yaml',f.source/'compose.yaml')
+            if case=='worker':
+                scripts=f.live/'scripts/ops';scripts.mkdir(parents=True)
+                progress=scripts/'gateway-recovery.py'
+                progress.write_text('OBSERVE_HTTP={}\ndef worker_health(c, now):\n return {"ok":True,"ready":False,"dependencyFailures":2}\n')
+                f.run('plan')
+                text=(args.evidence/'worker-plan.log').read_text()
+                assert '"activation_required": false' in text and '"ready": true' in text, 'upstream failure forced worker activation'
+                assert '"upstream_ready": false' in text, 'upstream readiness is not reported separately'
+                progress.write_text('OBSERVE_HTTP={}\ndef worker_health(c, now):\n return {"ok":False,"ready":False}\n')
+                f.run('stalled-plan')
+                assert '"activation_required": true' in (args.evidence/'worker-stalled-plan.log').read_text(), 'stalled worker was treated as healthy'
+                assert not f.state()['mutations']
+                print('PASS',case,flush=True)
+                continue
+            if case in ('cpa-config','keeper-config'):
+                seed=f.source/'data/cpa/conf/config.yaml';seed.parent.mkdir(parents=True)
+                seed.write_text(f.cpa.read_text())
+                baseline=f.live/'.ai-ops-state/data__cpa__conf__config.yaml.baseline'
+                baseline.write_text('historical config\n')
+                live={'config-version':8,'server':{'host':'','port':8317},'management':{'secret-key':'secret-fixture'},'access':{'api-keys':['secret-fixture']},'api-keys':{'openai-compatibility':[{'models':[{'name':'new-model'}]}]},'routing':{'strategy':'fill-first','session-affinity':True,'session-affinity-ttl':'1h'}}
+                f.cpa.write_text(json.dumps(live));original=f.cpa.read_bytes()
+                digest=f.run('drift-plan')
+                assert '"activation_required": false' in (args.evidence/(case+'-drift-plan.log')).read_text()
+                seed.unlink()
+                f.run('noop-apply',apply=True,digest=digest)
+                assert f.cpa.read_bytes()==original and baseline.read_text()=='historical config\n'
+                assert not f.state()['mutations']
+                # Schema changes remain worker-owned; only CPA profiles need parseable YAML.
+                f.cpa.write_text('{"config-version":99,"new-layout":{}}')
+                f.run('new-schema')
+                for label,invalid in [('invalid-yaml','broken: ['),('not-mapping','[]')]:
+                    f.cpa.write_text(invalid)
+                    f.run(label,success=case=='keeper-config')
+                f.cpa.unlink()
+                f.run('missing-live',success=case=='keeper-config')
+                assert not f.cpa.exists(), 'preflight bootstrapped without explicit initialization'
+                print('PASS',case,flush=True)
+                continue
             if case=='preload':
                 state=f.state();state['images'][f.new]='sha256:'+'c'*64;f.save(state)
             if args.mutation:

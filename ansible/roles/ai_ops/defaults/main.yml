@@ -6,6 +6,8 @@
 # Absolute path to the operator's private config directory (never committed).
 # Contains: compose.yaml, compose.override.yaml, .env, aisix/resources.yaml,
 # cpa-model-sync/config.json, data/egress-proxy/policy.json — adopted from production at baseline.
+# data/cpa/conf/config.yaml is worker-owned; an optional private copy is a
+# bootstrap seed only, never a deploy source or baseline.
 ai_ops_config_dir: "{{ playbook_dir }}/private-config"
 
 # Remote deployment root on the gateway host.
