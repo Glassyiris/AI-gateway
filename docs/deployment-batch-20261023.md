@@ -158,6 +158,44 @@ No production rollback drill, new load/CPU acceptance, VM reboot, Sub2API change
 or egress-proxy rebuild occurred. The successful cap rollout does not close the
 remaining controlled resource/throughput or Operator acceptance paths.
 
+## Keeper — background terminal forwarding rollout (2026-10-24)
+
+The user approved immediate deployment of source
+`ade3d346de4c342d24996c058f3542d9a2bd3e1f` and accepted another cache wipe.
+Pinned image:
+`ghcr.io/xz-dev/openai-api-cache-keeper:ade3d346de4c342d24996c058f3542d9a2bd3e1f@sha256:b8e12e6d8a5caf74a17b4615754655df3f409c7ad5721bae40eb3ac768964c0f`.
+Exact-source [CI 40100189550](https://github.com/xz-dev/openai-api-cache-keeper/actions/runs/40100189550)
+passed fmt/vet/race and published the image; artifact publication alone does not
+change production. Compose, the example image override and the keeper submodule
+now select the same source revision.
+
+The fix forwards valid upstream `response.failed`, `response.incomplete` and
+`error` terminal events to active background subscribers, preserving nullable
+error codes, empty messages and unknown fields. Failed tasks still cannot
+produce a successful checkpoint/cache entry; a later GET remains explicitly
+unavailable. It does not add an upstream generation, account/owner isolation,
+model selection or any bridge change. Ordinary parent expansion, access LRU and
+write-time TTL remain unchanged.
+
+This is an **image-only** production rollout: preserve the complete environment,
+including `24h / 10000 / 1073741824`, and existing 0.5 CPU / 384 MiB / no swap /
+64 PID bounds. Repository defaults remain `10m / 100 / 0`. Before applying,
+validate and push this pin with exact-tip green CI, then use a fresh guarded
+keeper plan/digest from that clean `main`. Prepare rollback to the same
+pre-deploy `65ef67c` image **with the 1 GiB cap**, using this operation's private
+snapshot, not an earlier last-deploy pointer. Require image/revision/env/resource
+readback, unchanged neighbours, successful receipt and delayed baseline commit,
+released lock and production/private-config equality. Limit real smoke to four
+calls, zero retries, covering SSE parent/delta and WS recall on a new socket.
+
+This source-pin record does not itself attest runtime success. The per-stage
+transaction, final identities, timings, smoke results and rollback preparation
+are recorded privately in `/var/tmp/keeper-ade3-deploy-20261024/REPORT.md`
+(0700 directory, 0600 files). Recreating keeper clears all cached aliases; no
+production rollback drill or new CPU/load acceptance is authorized by this
+rollout. The earlier 26.5-hour natural-traffic observation applies to the old
+pre-cap container, not this newly recreated process.
+
 ## Limits
 
 No second VM boot, real rollback drill, formal 0.5-core CPU acceptance, long soak, or standards certification. Messages remains disabled; Sub2API, account modes, slash routing and keeper LRU are unchanged. Keeper startup still clears aliases; later long TTL will not survive a process restart. The production observation must have stop thresholds and an explicit owner before being armed.
