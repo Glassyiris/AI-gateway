@@ -42,7 +42,7 @@ Third apply, explicitly capped as the last allowed attempt, succeeded after a fr
 - At 06:09:53 all 55 project-container identities and all three Compose hashes are unchanged; production/private-config still equal. Recovery regression 22/22 passes.
 - Four real smoke calls, zero retries, all completed with exact SSE/WS new-socket recall. Keeper HTTP 06:10:01/03 and WS 06:10:06/08 each show `stored=true`, `previous=false/true`; correlated Sub2API IDs `863f2aec-37f4-4947-bc83-e21888396b20`, `c54639cc-974a-407e-9aff-dff200ac1ff1`, `9bd10322-a7aa-4c77-b152-93dcfbebd30f`, `162a5822-52df-490d-a065-f2b172637941`. Concurrent unrelated traffic was not counted as smoke.
 
-## Keeper — deployed; 24h observation running
+## Keeper — 24h experiment deployed (2026-10-23)
 
 Source/submodule `65ef67cd4cff0d15f7f75c7d338575058f274bd1`; dual-architecture index `sha256:6ae3cc3c4883ca447ee898e82ef52c56398eadb602059eba1a41721280baef1a`. Registry index, both platform manifests/configs and OCI source revisions were independently verified. Defaults/example are `10m / 100 / 0`; production `.env` overrides `24h / 10000 / 0`. Access LRU, write-time TTL and wipe-on-start are unchanged. The pre-rollout baseline was `10m / 200MiB payload cap / entries unlimited`, not `10m / 100 / 0`.
 
@@ -90,6 +90,73 @@ rsync -a --chmod=F600,D700 root@100.94.238.35:/root/AI-gateway/{compose.yaml,com
 Raise keeper/bridge caller timeouts and retain partial stdout on timeout as follow-up. Generic file-baseline advancement and durable success/failure receipts/finally cleanup also need a separate transaction improvement. Front profiles already have an `always` unlock, but killing the controller bypasses it; a normal-task `always` alone cannot guarantee recovery from controller death.
 
 Source/policy pin `d43893e` exact-tip [Validate39912843418](https://github.com/xz-dev/AI-gateway/actions/runs/39912843418) passed both jobs before the approved plan. Final documentation-tip CI and lease handoff are recorded in the local Chinese report `/var/tmp/deploy-batch-20261023/REPORT.md`.
+
+## Keeper — 1 GiB cap deployed (2026-10-24)
+
+After the completed `24h / 10000 / 0` observation, the user approved a 1 GiB
+live-payload cap and explicitly chose immediate deployment despite the cache
+wipe. Only the ignored production `.env` key
+`OPENAI_API_CACHE_KEEPER_STORE_MAX_BYTES` changed from `0` to `1073741824`.
+Repository defaults remain `10m / 100 / 0`; access LRU, write-time TTL,
+metadata/pin/compaction limits and the separate transient spool budget remain
+unchanged. Source `65ef67c` parses a non-negative decimal int64 byte count, not a
+size string. The cap does not bound total bbolt file size or filesystem usage.
+
+The first apply stopped **before snapshot/upload/activation** at an async pull:
+Tailscale SSH's su/PAM session emitted OSC 3008 terminal context on the same line
+as the async wrapper's JSON. Ansible could not deserialize it. The unchanged
+image pull finished successfully; no orphan remained. The owned lock was
+released with a failed progress/failure receipt, all containers/configuration/
+baselines stayed unchanged, and the local candidate `.env` was restored.
+The old `front-openai-api-cache-keeper-last.json` still described the 10-23
+rollout (rollback target `fe746f7`), **not this stopped attempt**; it was correctly
+not used. No destructive rollback was needed or claimed.
+
+Supervisor-approved fix `3f07208` disables SSH PTY allocation in repository
+`ansible.cfg`, without changing host PAM/profiles or the shared transaction.
+Both new regressions failed with the old config, then all 21 guards passed;
+the forced-PTY negative control still rejects OSC-prefixed JSON. The dynamic
+Ansible-plugin test runs when Ansible is installed; the config guard always
+runs. Local full validation and exact-tip [Validate 40090830698](https://github.com/xz-dev/AI-gateway/actions/runs/40090830698)
+passed. A harmless real async command and the full read-only keeper plan from
+clean pushed `main` passed with no PTY/become errors. Only then was the separately
+authorized **single retry** made, with fresh plan digest
+`f574d3ba2f02f8dc685f8ac25dce1c385b2de9ad194a9e1a6b66b19b8406639c`.
+
+- Apply **11:44:56–11:54:19 UTC**, **562.304s**, exit 0, `ok=129 changed=10 failed=0`.
+  Keeper alone was recreated at **11:52:08.733810177Z**, from `735f50dc89b6` to
+  `915a5ac8d638`; image ID/reference remain the exact `65ef67c` pin above.
+  Readback confirms healthy, `24h / 10000 / 1073741824`, and only that environment
+  value changed. All **54 project neighbours**, plus one non-project container,
+  retain ID/image/StartedAt/state. The namespace owner remains `c6c96e158b02`.
+- This retry actually exercised the full guarded production transaction:
+  `locked → preparing-image → image-ready → uploading-config → activating →
+  verifying → committing-baselines → complete`. Independent one-second reads
+  observed the old `.env.baseline` throughout upload/activation/verification,
+  its advancement only at **11:53:49Z**, success at **11:54:12Z**, and lock release
+  at **11:54:18Z**. Earlier no-op applies are not counted as this evidence.
+- Transaction `2311960fe5194c30a1fcb707f0facfc0`; snapshot
+  `/root/AI-gateway/.ai-ops-state/front-openai-api-cache-keeper-qmwxbpuu` is 0700,
+  its three original files and `receipt.json` are 0600. Snapshot hashes equal the
+  pre-deploy files. The last pointer now selects this deployment; a later
+  explicit guarded rollback requires a fresh plan/digest and would restore
+  `24h / 10000 / 0` with the same image, not recover wiped aliases.
+- Production/private-config/all three baselines agree: compose
+  `212d6695a8a538b6eadcdb272a80231b6643f95078fb7d0edde0aa0d33019de4`, override
+  `b3f46dcb7c8284845ecf247b1f225c4e7dff08684aa4b09d9e68822249ae6521`, `.env`
+  `63594d28c97bf17ee9d435dd453ea1e8e29d4d80e2565181df7b5f90e0ca6d12`.
+  The last pre-retry cache observation was 9477 aliases; startup discarded the
+  old history, and natural traffic was already repopulating it at readback.
+- **Four real calls, zero retries**, **11:55:11–11:55:35Z**: SSE marker/parent-delta
+  recall `3.976s / 4.561s`; WS marker/new-socket parent-delta recall
+  `2.304s / 2.604s`. All four returned `completed`, both exact marker recalls
+  passed. Health/HTTP 101 were not treated as continuation acceptance.
+
+Private logs, before/after reads, observer trace, prepared rollback instructions
+and Chinese report: `/var/tmp/keeper-cap-deploy-20261024/` (0700, files 0600).
+No production rollback drill, new load/CPU acceptance, VM reboot, Sub2API change
+or egress-proxy rebuild occurred. The successful cap rollout does not close the
+remaining controlled resource/throughput or Operator acceptance paths.
 
 ## Limits
 

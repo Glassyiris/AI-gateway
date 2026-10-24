@@ -267,6 +267,11 @@ real SSE/WS terminal and reconnect acceptance is a separate authorized check.
 
 ### Controller deadline, logs and stale-lock recovery
 
+Repository `ansible.cfg` disables SSH PTY allocation (`usetty=false`). Tailscale
+SSH opens a su/PAM session; with a PTY, OSC 3008 context markers can prefix async
+wrapper JSON on the same line and break Ansible decoding. Keep automation
+non-interactive rather than editing host PAM or shell profiles.
+
 Allow **at least 1800 seconds** for the whole controller invocation. Docker
 pull/recreate each have a 600-second remote async bound; that is not the whole
 playbook's duration. Do not put a 300-second `subprocess.run(timeout=...)` around
