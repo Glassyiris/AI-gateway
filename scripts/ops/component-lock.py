@@ -117,6 +117,60 @@ def release(root, request, recover=False):
     return {'released': True, 'transaction': owner['transaction'], 'receipt': str(path)}
 
 
+def rollback_guard(root, request):
+    state = Path(root) / '.ai-ops-state'
+    service, snapshot, live = request['service'], request['snapshot'], request['live']
+    after = None
+
+    def refuse(reason):
+        raise AssertionError('Rollback refused: ' + reason + '; live=' + json.dumps(live, sort_keys=True) +
+                             '; snapshot=' + snapshot + '; after=' + json.dumps(after, sort_keys=True))
+
+    try:
+        target = Path(snapshot)
+        if target.parent != state or not target.name.startswith('front-' + service + '-'):
+            refuse('snapshot does not belong to this profile')
+        own_transaction = request.get('transaction')
+        if own_transaction:
+            _, _, owner, _ = owned(root, own_transaction)
+            assert owner['operation'] == 'rollback' and owner['service'] == service
+        receipts = []
+        for path in state.glob('transaction-*.json'):
+            receipt = json.loads(path.read_text())
+            owner = receipt['owner']
+            if owner['service'] == service and owner['transaction'] != own_transaction:
+                assert owner['root'] == str(Path(root))
+                assert path == paths(root, owner['transaction'])[1]
+                receipts.append(receipt)
+        if not receipts:
+            refuse('no transaction provenance; reconcile manually')
+        latest = max(receipts, key=lambda r: r['owner']['started'])
+        if latest.get('snapshot') != snapshot:
+            refuse('newest transaction ' + latest['owner']['transaction'] +
+                   ' has snapshot=' + str(latest.get('snapshot') or 'none') +
+                   '; last.json is stale')
+        if latest['owner']['operation'] != 'deploy':
+            refuse('newest transaction is not the selected deployment')
+        if latest['outcome'] == 'success':
+            result = json.loads((target / 'receipt.json').read_text())
+        elif latest['outcome'] == 'failed':
+            result = json.loads((state / ('front-' + service + '-failure.json')).read_text())
+            assert result['transaction'] == latest['owner']['transaction']
+        else:
+            refuse('newest transaction has no terminal readback; reconcile manually')
+        assert result['service'] == service and result['snapshot'] == snapshot
+        after = result.get('after')
+        if not after or live != after:
+            refuse('live identity differs from recorded after identity')
+        return {'snapshot': snapshot, 'after': after}
+    except AssertionError as exc:
+        if str(exc).startswith('Rollback refused:'):
+            raise
+        refuse('invalid transaction/readback provenance; reconcile manually')
+    except (OSError, KeyError, ValueError, TypeError):
+        refuse('missing or invalid transaction/readback receipt; reconcile manually')
+
+
 def controller_identity():
     controller = None
     pid = os.getpid()
@@ -148,6 +202,8 @@ if __name__ == '__main__':
             result = acquire(root, request)
         elif action == 'progress':
             result = progress(root, request)
+        elif action == 'rollback-guard':
+            result = rollback_guard(root, request)
         elif action == 'controller-identity':
             result = controller_identity()
         elif action == 'controller-check':
@@ -157,5 +213,6 @@ if __name__ == '__main__':
         else:
             raise AssertionError('unknown lock action')
         print(json.dumps(result))
-    except (AssertionError, OSError, KeyError, ValueError):
-        sys.exit('component lock operation refused; inspect ownership/progress before recovery')
+    except (AssertionError, OSError, KeyError, ValueError) as exc:
+        sys.exit(str(exc) if action == 'rollback-guard' and str(exc).startswith('Rollback refused:') else
+                 'component lock operation refused; inspect ownership/progress before recovery')

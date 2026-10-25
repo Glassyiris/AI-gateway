@@ -249,10 +249,18 @@ fresh group readback are all three baselines committed. The private snapshot con
 rollback reference is `.ai-ops-state/front-<service>-last.json`.
 
 A failed activation stops with a private `front-<service>-failure.json` receipt;
-it does **not** blindly restore over an unknown live state. The explicit rollback plan accepts only old/candidate file hashes and
-image IDs from the recorded transaction, unchanged protected containers, and
-intact snapshot hashes. Rollback never pulls or builds and must read back the
-original image ID. Another intervening operation requires manual reconciliation.
+it does **not** blindly restore over an unknown live state. `last.json` alone is
+not rollback authority: the newest transaction receipt for that profile must
+name that snapshot. A newer failed/aborted attempt without its own snapshot
+refuses rollback instead of silently undoing an older deployment. The live
+container ID/image/StartedAt/state must exactly match the snapshot's recorded
+**after** identity (successful readback, or fresh failure readback bound to that
+transaction). Missing/unknown failure readback, including legacy failed receipts,
+fails closed for manual reconciliation; there is no override flag. Refusals show
+live/snapshot identities without credentials. Existing old/candidate file-hash,
+protected-container and intact-snapshot checks still apply. Rollback never pulls
+or builds and must read back the original image ID. Another intervening operation
+requires manual reconciliation.
 After any emergency edit or rollback, adopt the resulting files back into local
 `private-config` immediately. The host Git checkout is never a deployment source.
 

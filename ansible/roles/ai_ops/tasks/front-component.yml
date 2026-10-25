@@ -115,6 +115,14 @@
 - name: Read current configuration and container identities
   ansible.builtin.include_tasks: front-state.yml
 
+- name: Refuse stale rollback selection or unrelated live identity
+  ansible.builtin.command:
+    argv: [python3, '-c', "{{ lookup('file', playbook_dir + '/../scripts/ops/component-lock.py', rstrip=false) }}", rollback-guard, "{{ ai_ops_deploy_root }}"]
+    stdin: "{{ {'service': service, 'snapshot': _front_previous.snapshot, 'live': _front_runtime.identity.target} | to_json }}"
+    stdin_add_newline: false
+  changed_when: false
+  when: _front_operation == 'rollback'
+
 - name: Validate single-service scope and pure-cache topology
   ansible.builtin.command:
     argv:
@@ -318,6 +326,14 @@
           - _front_operation != 'rollback' or _front_candidate_image_id == _front_previous.before_runtime.target.image
         fail_msg: CAS failed after image preparation; no configuration was uploaded and no container recreated.
 
+    - name: Recheck rollback provenance under the owned lock before writes
+      ansible.builtin.command:
+        argv: [python3, '-c', "{{ lookup('file', playbook_dir + '/../scripts/ops/component-lock.py', rstrip=false) }}", rollback-guard, "{{ ai_ops_deploy_root }}"]
+        stdin: "{{ {'service': service, 'snapshot': _front_previous.snapshot, 'live': _front_runtime.identity.target, 'transaction': _front_transaction} | to_json }}"
+        stdin_add_newline: false
+      changed_when: false
+      when: _front_operation == 'rollback'
+
     - name: Allocate immutable private snapshot
       ansible.builtin.tempfile:
         state: directory
@@ -497,11 +513,26 @@
           protected_containers_unchanged: "{{ _front_runtime.identity.protected | length }}"
           private_snapshot: "{{ _front_snapshot_dir.path }}"
   rescue:
+    - name: Read stopped component identity for explicit rollback provenance
+      when: _front_snapshot_dir is defined
+      block:
+        - name: Read failed activation runtime without requiring health
+          ansible.builtin.include_tasks: front-runtime.yml
+          vars:
+            _front_wait: false
+        - name: Remember observed failure identity
+          ansible.builtin.set_fact:
+            _front_failure_after: "{{ _front_runtime.identity.target }}"
+      rescue:
+        - name: Leave unreadable failure identity unproven
+          ansible.builtin.set_fact:
+            _front_failure_after: null
+
     - name: Record sanitized stopped operation without claiming recovery
       ansible.builtin.copy:
         dest: "{{ ai_ops_deploy_root }}/.ai-ops-state/front-{{ service }}-failure.json"
         mode: '0600'
-        content: "{{ {'service': service, 'operation': _front_operation, 'approval_digest': _front_plan_digest, 'stage': ansible_failed_task.name, 'snapshot': _front_snapshot_dir.path if _front_snapshot_dir is defined else '', 'outcome': 'recovery-required' if _front_snapshot_dir is defined else 'stopped-before-upload'} | to_nice_json }}\n"
+        content: "{{ {'service': service, 'operation': _front_operation, 'approval_digest': _front_plan_digest, 'stage': ansible_failed_task.name, 'snapshot': _front_snapshot_dir.path if _front_snapshot_dir is defined else '', 'transaction': _front_transaction, 'after': _front_failure_after | default(none), 'outcome': 'recovery-required' if _front_snapshot_dir is defined else 'stopped-before-upload'} | to_nice_json }}\n"
       when: _front_writer_lock is defined and _front_writer_lock.rc | default(1) == 0
 
     - name: Persist failed transaction stage without claiming rollback

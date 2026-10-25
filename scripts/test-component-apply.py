@@ -220,12 +220,12 @@ def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--evidence', type=Path, required=True)
     parser.add_argument('--mutation', choices=['no-image-proof','early-baseline','no-progress','no-native-probe','no-group-cas','no-neighbour-check'])
-    parser.add_argument('--case', choices=['skip','digest','rollback','kill','native','generic','cas','neighbour','front','preload','worker','cpa-config','keeper-config'], action='append')
+    parser.add_argument('--case', choices=['skip','digest','rollback','kill','native','generic','cas','neighbour','front','preload','worker','cpa-config','keeper-config','rollback-stale','rollback-identity'], action='append')
     args=parser.parse_args()
     args.evidence.mkdir(parents=True,exist_ok=True,mode=0o700)
     server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Probe)
     threading.Thread(target=server.serve_forever,daemon=True).start()
-    for case in args.case or ['skip','digest','rollback','kill','native','generic','cas','neighbour','front','preload','worker','cpa-config','keeper-config']:
+    for case in args.case or ['skip','digest','rollback','kill','native','generic','cas','neighbour','front','preload','worker','cpa-config','keeper-config','rollback-stale','rollback-identity']:
         f=Fixture(args.evidence,case,'aisix-status' if case=='native' else 'responses-ws-sse-bridge' if case=='front' else 'cloudflared' if case=='preload' else 'cpa-model-sync' if case=='worker' else 'cli-proxy-api' if case=='cpa-config' else 'openai-api-cache-keeper' if case=='keeper-config' else 'models-enricher',native=case not in ('native','worker'))
         try:
             if case in ('worker','cpa-config','keeper-config'):
@@ -278,7 +278,30 @@ def main():
                 (scripts/'gateway-recovery.py').write_text('import runpy, os\nglobals().update(runpy.run_path('+repr(str(ROOT/'scripts/ops/gateway-recovery.py'))+'))\nos.setns=lambda *args:None\nOBSERVE_HTTP["aisix-status"]=("127.0.0.1",'+str(server.server_port)+',"/",404)\n')
             digest=f.run('plan');assert digest and not f.state()['mutations']
             state=f.state()
-            if case in ('skip','digest','rollback','cas','neighbour'):
+            if case in ('rollback-stale','rollback-identity'):
+                f.run('apply',apply=True,digest=digest)
+                state=f.state()
+                if case=='rollback-stale':
+                    # A newer attempt fails before snapshot; last.json still points backwards.
+                    candidate=json.loads((f.source/'compose.yaml').read_text())
+                    candidate['services'][f.service]['image']=f.new.replace('d'*64,'e'*64)
+                    (f.source/'compose.yaml').write_text(json.dumps(candidate))
+                    state['skip_pull']=True;f.save(state)
+                    fresh=f.run('new-plan')
+                    f.run('failed-before-snapshot',apply=True,digest=fresh,success=False)
+                else:
+                    # Same image, different container: image-only checks cannot prove provenance.
+                    state['containers'][0]['Id']='unrelated-replacement'
+                    state['containers'][0]['State']['StartedAt']='2026-10-25T00:00:00Z'
+                    f.save(state)
+                mutations=f.state()['mutations'][:]
+                baselines=f.baselines()
+                f.run('refused',op='rollback',success=False)
+                text=(args.evidence/(case+'-refused.log')).read_text()
+                assert 'Rollback refused:' in text and 'live=' in text and 'snapshot=' in text
+                assert f.state()['mutations']==mutations and f.baselines()==baselines
+                assert not (f.live/'.ai-ops-state/front-component.lock').exists()
+            elif case in ('skip','digest','rollback','cas','neighbour'):
                 state[{'skip':'skip_pull','digest':'wrong_digest','rollback':'fail_up','cas':'drift_on_pull','neighbour':'drift_neighbour'}[case]]=True;f.save(state)
                 f.run('apply',apply=True,digest=digest,success=False)
                 assert f.baselines()==f.initial_baselines, 'failed apply advanced a baseline'

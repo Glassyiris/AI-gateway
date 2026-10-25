@@ -156,6 +156,85 @@ class OwnedLock(unittest.TestCase):
         self.assertEqual(set(LOCK.live_writers(proc, set())), {2, 3})
 
 
+class RollbackSelection(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='rollback-selection-', dir='/var/tmp')
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.state = self.root / '.ai-ops-state'
+        self.state.mkdir(mode=0o700)
+        self.snapshot = self.state / 'front-models-enricher-original'
+        self.snapshot.mkdir(mode=0o700)
+        self.live = {'id': 'container-new', 'image': ID, 'started': '2026-10-25T01:00:00Z',
+                     'running': True, 'paused': False, 'restarting': False}
+        self.owner = {'transaction': 'a'*32, 'root': str(self.root), 'service': 'models-enricher',
+                      'operation': 'deploy', 'started': 10}
+        self.receipt = {'owner': self.owner, 'snapshot': str(self.snapshot), 'outcome': 'success'}
+        LOCK.atomic_json(LOCK.paths(self.root, self.owner['transaction'])[1], self.receipt)
+        self.result = {'service': 'models-enricher', 'snapshot': str(self.snapshot), 'after': self.live}
+        LOCK.atomic_json(self.snapshot/'receipt.json', self.result)
+        self.request = {'service': 'models-enricher', 'snapshot': str(self.snapshot), 'live': self.live}
+
+    def test_exact_success_after_identity_and_unrelated_profile(self):
+        other = {**self.receipt, 'owner': {**self.owner, 'service': 'other', 'transaction': 'b'*32, 'started': 20}}
+        LOCK.atomic_json(LOCK.paths(self.root, 'b'*32)[1], other)
+        self.assertEqual(LOCK.rollback_guard(self.root, self.request)['after'], self.live)
+
+    def test_newer_failed_or_aborted_attempt_without_snapshot_refuses_stale_last(self):
+        for outcome in ('failed', 'in-progress', 'recovery-required'):
+            with self.subTest(outcome=outcome):
+                newest = {**self.receipt, 'owner': {**self.owner, 'transaction': 'b'*32, 'started': 20},
+                          'outcome': outcome, 'snapshot': ''}
+                LOCK.atomic_json(LOCK.paths(self.root, 'b'*32)[1], newest)
+                with self.assertRaisesRegex(AssertionError, r'Rollback refused:.*snapshot=none.*live=.*snapshot='):
+                    LOCK.rollback_guard(self.root, self.request)
+
+    def test_owned_rollback_rechecks_predecessor_without_hiding_an_intervening_attempt(self):
+        LOCK.acquire(self.root, {**self.owner, 'transaction': 'c'*32, 'operation': 'rollback'})
+        request = {**self.request, 'transaction': 'c'*32}
+        self.assertEqual(LOCK.rollback_guard(self.root, request)['after'], self.live)
+        newest = {**self.receipt, 'owner': {**self.owner, 'transaction': 'b'*32, 'started': 20},
+                  'outcome': 'failed', 'snapshot': ''}
+        LOCK.atomic_json(LOCK.paths(self.root, 'b'*32)[1], newest)
+        with self.assertRaisesRegex(AssertionError, 'last.json is stale'):
+            LOCK.rollback_guard(self.root, request)
+        with self.assertRaisesRegex(AssertionError, 'invalid transaction/readback provenance'):
+            LOCK.rollback_guard(self.root, {**self.request, 'transaction': 'b'*32})
+
+    def test_same_image_replacement_restart_or_state_change_refused(self):
+        for key, value in [('id', 'unrelated'), ('started', 'later'), ('running', False), ('image', PIN)]:
+            with self.subTest(key=key), self.assertRaisesRegex(AssertionError, 'live identity differs.*live=.*after='):
+                LOCK.rollback_guard(self.root, {**self.request, 'live': {**self.live, key: value}})
+
+    def test_failed_activation_needs_its_own_recorded_after_identity(self):
+        self.receipt['outcome'] = 'failed'
+        LOCK.atomic_json(LOCK.paths(self.root, 'a'*32)[1], self.receipt)
+        failure = self.state/'front-models-enricher-failure.json'
+        for after in (None, {**self.live, 'id': 'other'}, self.live):
+            LOCK.atomic_json(failure, {**self.result, 'transaction': 'a'*32, 'after': after})
+            if after == self.live:
+                self.assertEqual(LOCK.rollback_guard(self.root, self.request)['after'], self.live)
+            else:
+                with self.assertRaisesRegex(AssertionError, 'live identity differs'):
+                    LOCK.rollback_guard(self.root, self.request)
+        LOCK.atomic_json(failure, {**self.result, 'transaction': 'b'*32})
+        with self.assertRaisesRegex(AssertionError, 'invalid transaction/readback provenance'):
+            LOCK.rollback_guard(self.root, self.request)
+
+    def test_missing_corrupt_or_nonterminal_evidence_fails_closed(self):
+        for outcome in ('in-progress', 'recovery-required'):
+            LOCK.atomic_json(LOCK.paths(self.root, 'a'*32)[1], {**self.receipt, 'outcome': outcome})
+            with self.assertRaisesRegex(AssertionError, 'no terminal readback'):
+                LOCK.rollback_guard(self.root, self.request)
+        LOCK.atomic_json(LOCK.paths(self.root, 'a'*32)[1], self.receipt)
+        (self.snapshot/'receipt.json').write_text('{}')
+        with self.assertRaisesRegex(AssertionError, 'missing or invalid'):
+            LOCK.rollback_guard(self.root, self.request)
+        LOCK.paths(self.root, 'a'*32)[1].unlink()
+        with self.assertRaisesRegex(AssertionError, 'no transaction provenance'):
+            LOCK.rollback_guard(self.root, self.request)
+
+
 class SSHModuleOutput(unittest.TestCase):
     def test_automation_does_not_request_a_terminal(self):
         config = configparser.ConfigParser()
@@ -230,6 +309,13 @@ class TaskOrdering(unittest.TestCase):
         self.assertIn('_front_candidate_image_id == _front_planned_image_id', text)
         self.assertIn('Validate candidate Compose explicitly', text)
         self.assertIn('Validate uploaded candidate using the exact apply Compose argv', text)
+
+    def test_rollback_guard_precedes_any_mutation(self):
+        text = (ROOT / 'ansible/roles/ai_ops/tasks/front-component.yml').read_text()
+        self.assertLess(text.index('Refuse stale rollback selection'), text.index('Acquire exclusive owned'))
+        self.assertEqual(text.count('rollback-guard'), 2)
+        self.assertLess(text.index('Recheck rollback provenance under the owned lock'), text.index('Allocate immutable private snapshot'))
+        self.assertIn("'after': _front_failure_after | default(none)", text)
 
     def test_existing_native_probe_is_reused_not_reimplemented(self):
         runtime = (ROOT / 'ansible/roles/ai_ops/tasks/front-runtime.yml').read_text()
