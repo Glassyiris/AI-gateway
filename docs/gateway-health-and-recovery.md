@@ -18,7 +18,7 @@ Health has three separate meanings:
 | responses-ws-sse-bridge | `GET :8086/healthz`, HTTP 200 | Bridge local liveness; deployed 2026-10-23, see the [rollout record](deployment-batch-20261023.md#recovery-guard--deployed) |
 | models-enricher | `GET /healthz`, HTTP 200 | Enricher local liveness |
 | ai-sse-keepalive-proxy | `GET /healthz`, HTTP 200 | Keepalive proxy local liveness |
-| apisix | Local `GET /v1/models`, expected HTTP 404 | APISIX's local rejection route responds; no upstream request |
+| apisix | Local `GET /healthz`, expected HTTP 404 | APISIX's unmatched-route rejection responds; no upstream request |
 | apisix-models | Local `GET /healthz`, HTTP 200 | APISIX's explicit local health route responds; no CPA request |
 
 The CPA key comes from the existing `apisix-models` container environment; the front keeper does not hold it. It remains in process memory, not arguments or logs. A missing key or HTTP 401/403 is **unknown**, not a restart decision. An inaccessible namespace is also unknown. Deployment refuses unknown or failed probes.
@@ -37,6 +37,29 @@ Recovery policy:
 Each cycle also reports `startup_unit` from a bounded, read-only `systemctl show ai-gateway.service`. A failed startup is visible as `state=failed, ok=false, action=observe_only`. It never resets the unit's start limit, starts the stack, or starts an exited container. Unknown systemd state is reported as unknown, not success.
 
 This does not prove that every upstream preparation/write stall also blocks the catalog. It does not identify CPA's memory-growth root cause. A successful systemd invocation means the guard ran; inspect individual `checks[].ok` and `action`, not only the unit result.
+
+### Public APISIX probe and keyless catalog noise
+
+The public APISIX has no `/healthz` upstream route: its native unmatched-route
+404 is a bounded local liveness check. Keep both its Compose HEALTHCHECK and
+recovery `CHECKS` on that path, expecting **404**, not 200 or 401. The inner
+`apisix-models` has a separate explicit `/healthz` route returning 200.
+
+The former public `/v1/models` probe was not local: it traversed keepalive,
+keeper and bridge to Sub2API, which returned 401 without a key. Public APISIX
+then rewrote that to 404. Read-only production correlation on 2026-10-25 matched
+85/85 keepalive 401s in a 15-minute window to loopback APISIX probes (no User-Agent):
+60 HTTP/1.0 requests from the 15-second Docker healthcheck and 25 HTTP/1.1
+requests from the recovery timer (about 36 seconds including runtime/jitter).
+The combined cadence explains the approximately 10.6-second noise; this was
+internal probe traffic, not evidence of an external client misconfiguration.
+
+Changing the repository does not update production. Deploy the recovery script
+through its guarded `deploy-recovery` entry point, and separately review the
+public APISIX HEALTHCHECK Compose update/recreate. The component image/env-only
+transaction does not permit healthcheck changes; do not use full-stack `up` as
+a workaround or activate the deferred Operator services. No keeper recreate or
+cache wipe is needed for this probe fix. Keep catalog authentication intact.
 
 ## Deploy and inspect
 

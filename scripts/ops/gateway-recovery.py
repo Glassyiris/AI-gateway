@@ -25,7 +25,7 @@ CHECKS = {
     "responses-ws-sse-bridge": (8086, "/healthz", 200),
     "models-enricher": (8090, "/healthz", 200),
     "ai-sse-keepalive-proxy": (8080, "/healthz", 200),
-    "apisix": (9080, "/v1/models", 404),
+    "apisix": (9080, "/healthz", 404),
     "apisix-models": (9080, "/healthz", 200),
 }
 # Observations only: never expand the application restart allowlist above.

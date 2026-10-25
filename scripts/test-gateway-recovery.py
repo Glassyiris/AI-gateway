@@ -97,6 +97,28 @@ class RecoveryTests(unittest.TestCase):
             subprocess.run(["bash", "-ec", command], capture_output=True, timeout=0.03)
         Handler.delay = 0
 
+    def test_public_apisix_probes_use_local_unmatched_route_not_authenticated_catalog(self):
+        self.assertEqual(recovery.CHECKS['apisix'], (9080, '/healthz', 404))
+        text = (ROOT / 'compose.yaml').read_text()
+        block = text.split('\n  apisix:\n', 1)[1].split('\n  operator-host-netns:\n', 1)[0]
+        command = json.loads(re.search(r'test: \[CMD, /bin/bash, -ec, ("[^\n]+")\]', block)[1])
+        self.assertIn('GET /healthz HTTP/1.0', command)
+        self.assertNotIn('/v1/models', command)
+        command = command.replace('$$', '$').replace('127.0.0.1/9080', '127.0.0.1/' + str(self.port))
+        paths = []
+        original = Handler.do_GET
+        def record(handler):
+            paths.append(handler.path)
+            original(handler)
+        with mock.patch.object(Handler, 'do_GET', record):
+            for status in (404, 401, 200, 502, 503):
+                Handler.status = status
+                with self.subTest(status=status):
+                    result = subprocess.run(['bash', '-ec', command], capture_output=True, timeout=2)
+                    self.assertEqual(result.returncode == 0, status == 404)
+                    self.assertEqual(recovery.probe_http(self.port, recovery.CHECKS['apisix'][1], 404)['ok'], status == 404)
+        self.assertEqual(paths, ['/healthz'] * 10)
+
     def test_failure_threshold_grace_reset_cooldown_and_hourly_budget(self):
         state = {}
         for offset in range(3):

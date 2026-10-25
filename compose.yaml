@@ -493,7 +493,7 @@ services:
       - ./apisix/apisix.yaml:/usr/local/apisix/conf/apisix.yaml:ro,Z
       - ./apisix/lua:/opt/apisix/custom:ro,Z
     healthcheck:
-      test: [CMD, /bin/bash, -ec, "exec 3<>/dev/tcp/127.0.0.1/9080; printf 'GET /v1/models HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3; IFS= read -r line <&3; [[ \"$$line\" == *\" 404 \"* ]]"]
+      test: [CMD, /bin/bash, -ec, "exec 3<>/dev/tcp/127.0.0.1/9080; printf 'GET /healthz HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3; IFS= read -r line <&3; [[ \"$$line\" == *\" 404 \"* ]]"]
       interval: 15s
       timeout: 5s
       retries: 3
